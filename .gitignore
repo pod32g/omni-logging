@@ -1,0 +1,27 @@
+# Binaries
+/omnilog
+/dist/
+*.exe
+*.test
+*.out
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
+/data/
+*.log
+
+# Go
+/vendor/
+
+# Node / Vite (web UI)
+web/node_modules/
+web/dist/
+internal/web/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
