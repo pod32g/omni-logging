@@ -1,0 +1,30 @@
+# Omni-logging deployment. The image is built from the repo Dockerfile (a
+# static, CGO-free binary on distroless). Log data lives in a named volume so it
+# survives container recreation; the volume name is pinned so the deploy's
+# backup/restore can address it directly.
+services:
+  omnilog:
+    build: .
+    image: omnilog:latest
+    container_name: omnilog
+    restart: unless-stopped
+    command: ["serve", "--addr", ":8080", "--db", "/data/omni.db", "--retention-days", "14"]
+    ports:
+      - "${OMNILOG_HOST_PORT:-8080}:8080"
+    environment:
+      # Optional secrets; set in a .env file next to this compose file.
+      OMNILOG_ADMIN_TOKEN: ${OMNILOG_ADMIN_TOKEN:-}
+      OMNILOG_INGEST_KEYS: ${OMNILOG_INGEST_KEYS:-}
+    volumes:
+      - omnilog-data:/data
+    healthcheck:
+      # The distroless image has no shell/curl, so the binary probes itself.
+      test: ["CMD", "/omnilog", "healthcheck", "--url", "http://localhost:8080/api/v1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  omnilog-data:
+    name: omnilog-data

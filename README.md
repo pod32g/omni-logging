@@ -74,6 +74,27 @@ project builds with a single `go build` — no Node toolchain required. See the
 design spec in
 [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
 
+## Deployment & CI/CD
+
+A GitHub Actions workflow ([`.github/workflows/cicd.yml`](.github/workflows/cicd.yml))
+runs on a **self-hosted runner that lives on the deploy target** (the deploy target),
+so the deploy runs local `docker` commands — no SSH hop, no stored credentials.
+
+- **`build`** — builds the image (`docker compose build`) on every push/PR; gates deploy. Fork PRs from outside the repo are not run on the self-hosted runner.
+- **`deploy`** — runs only on `main`. Because omni-logging is **stateful** (SQLite + WAL), the deploy is hardened: online `VACUUM INTO` backup → stop-first recreate → health wait → external smoke test → `PRAGMA integrity_check` → auto-heal from the latest backup if the check fails. Deploys are serialized (`concurrency: deploy-omnilog`).
+
+The binary self-validates so the distroless image needs no extra tools:
+
+```sh
+omnilog backup --db /data/omni.db --out /data/backups/snap.db   # WAL-safe snapshot
+omnilog integrity --db /data/omni.db                            # PRAGMA integrity_check
+omnilog healthcheck --url http://localhost:8080/api/v1/healthz  # container HEALTHCHECK
+```
+
+Run locally with Compose: `docker compose up --build -d` (UI on `:8080`,
+data in the `omnilog-data` volume). Set `OMNILOG_ADMIN_TOKEN` / `OMNILOG_INGEST_KEYS`
+in a `.env` file to enable auth.
+
 ## Development
 
 ```sh

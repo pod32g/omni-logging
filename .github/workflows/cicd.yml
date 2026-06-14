@@ -1,0 +1,116 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Cancel superseded runs per ref, except on main (never cancel a main deploy).
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: [self-hosted, omnilog]   # MUST match the runner's labels
+    # SECURITY: never run untrusted fork-PR code on a self-hosted runner.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (gate — must pass before deploy)
+        run: docker compose build
+
+  deploy:
+    needs: [build]
+    if: github.ref == 'refs/heads/main'   # only main deploys
+    runs-on: [self-hosted, omnilog]
+    concurrency:
+      group: deploy-omnilog               # serialize deploys; never overlap
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy on the target (local docker — the runner is on the target)
+        env:
+          DEST: $HOME/omnilog
+          SVC: omnilog
+          VOL: omnilog-data
+          DBPATH: /data/omni.db
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+
+          # Sync the checked-out code into the deploy dir. No --delete: live data
+          # lives in the named docker volume, never in this directory.
+          mkdir -p "$DEST" "$DEST/backups"
+          rsync -a --exclude='.git' --exclude='__pycache__' ./ "${DEST}/"
+          cd "$DEST"
+
+          ts="$(date +%Y%m%d-%H%M%S)"
+
+          # crash-loop guard: a wedged/restarting container on the runner's own
+          # box can starve the deploy, so stop it before doing anything else.
+          cid="$(docker compose ps -q "$SVC" 2>/dev/null || true)"
+          if [ -n "$cid" ]; then
+            state="$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || echo)"
+            case "$state" in
+              *restarting*|*unhealthy*) echo "guard: container is '$state' - stopping"; docker compose stop "$SVC" || true ;;
+            esac
+          fi
+
+          # back up BEFORE deploying (online VACUUM INTO; WAL-safe), if a running
+          # container exists. Copy the snapshot out to the host too.
+          cid="$(docker compose ps -q "$SVC" 2>/dev/null || true)"
+          if [ -n "$cid" ] && [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]; then
+            echo "backup: snapshotting DB before deploy"
+            docker compose exec -T "$SVC" /omnilog backup --db "$DBPATH" --out "/data/backups/omni-${ts}.db"
+            docker cp "$cid:/data/backups/omni-${ts}.db" "$DEST/backups/omni-${ts}.db"
+          else
+            echo "backup: no running container (first deploy?) - skipping"
+          fi
+
+          # stop-first, then recreate: old and new must never hold the DB at once.
+          docker compose stop "$SVC" 2>/dev/null || true
+          docker compose up --build -d "$SVC"
+
+          # wait for readiness (probe from inside; distroless binary self-checks).
+          ok=""
+          for i in $(seq 1 30); do
+            if docker compose exec -T "$SVC" /omnilog healthcheck --url "http://localhost:8080/api/v1/healthz" >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "deploy: service did not become healthy"; docker compose logs --tail=80 "$SVC"; exit 1
+          fi
+
+          # external smoke test on the published port (proves the port mapping).
+          curl -fsS --max-time 10 "http://localhost:${PORT}/api/v1/healthz" >/dev/null
+          echo "deploy: health OK on :${PORT}"
+
+          # integrity check; auto-heal from the latest backup on failure.
+          if docker compose exec -T "$SVC" /omnilog integrity --db "$DBPATH"; then
+            echo "deploy: integrity OK"
+          else
+            echo "deploy: INTEGRITY CHECK FAILED - auto-healing from latest backup"
+            latest="$(ls -1t "$DEST"/backups/*.db 2>/dev/null | head -1 || true)"
+            if [ -z "$latest" ]; then echo "no backup available to restore"; exit 1; fi
+            docker compose stop "$SVC" || true
+            # Surgery on the named volume needs a shell the distroless image lacks.
+            docker run --rm -v "$VOL":/data -v "$DEST/backups":/backups busybox \
+              sh -c "cp \"/backups/$(basename "$latest")\" /data/omni.db && rm -f /data/omni.db-wal /data/omni.db-shm"
+            docker compose up -d "$SVC"
+            for i in $(seq 1 30); do
+              docker compose exec -T "$SVC" /omnilog healthcheck --url "http://localhost:8080/api/v1/healthz" >/dev/null 2>&1 && break
+              sleep 2
+            done
+            if docker compose exec -T "$SVC" /omnilog integrity --db "$DBPATH"; then
+              echo "auto-heal: restored from $(basename "$latest") and integrity OK"
+            else
+              echo "auto-heal: integrity still failing after restore"; exit 1
+            fi
+          fi
+
+          # retain only the 10 most recent host-side backups.
+          ls -1t "$DEST"/backups/*.db 2>/dev/null | tail -n +11 | xargs -r rm -f || true
+          echo "deploy: success"

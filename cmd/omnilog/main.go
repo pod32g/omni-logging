@@ -12,10 +12,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -46,6 +48,12 @@ func main() {
 		err = runServe(os.Args[2:], logger)
 	case "forward":
 		err = runForward(os.Args[2:], logger)
+	case "backup":
+		err = runBackup(os.Args[2:])
+	case "integrity":
+		err = runIntegrity(os.Args[2:])
+	case "healthcheck":
+		err = runHealthcheck(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("omnilog", version)
 	case "help", "-h", "--help":
@@ -65,9 +73,12 @@ func usage() {
 	fmt.Fprint(os.Stderr, `omnilog — centralized logging server and forwarder
 
 Commands:
-  serve     Run the logging server (HTTP API + embedded web UI)
-  forward   Tail one or more files and forward them to a server
-  version   Print the version
+  serve        Run the logging server (HTTP API + embedded web UI)
+  forward      Tail one or more files and forward them to a server
+  backup       Write a consistent online snapshot of the database (VACUUM INTO)
+  integrity    Run PRAGMA integrity_check; exit non-zero if the DB is unsound
+  healthcheck  HTTP-probe a URL; exit non-zero unless it returns 2xx
+  version      Print the version
 
 Run "omnilog <command> -h" for command-specific flags.
 `)
@@ -238,6 +249,78 @@ func runForward(args []string, logger *slog.Logger) error {
 
 	logger.Info("omnilog forwarding", "server", *server, "files", []string(files), "service", *service)
 	return fwd.Run(ctx)
+}
+
+// runBackup writes a consistent online snapshot of the database to --out using
+// SQLite's VACUUM INTO (WAL-safe). Used by the deploy to back up before changes.
+func runBackup(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	db := fs.String("db", "omni.db", "path to the SQLite database")
+	out := fs.String("out", "", "destination snapshot path (must not already exist)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("backup: --out is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		return fmt.Errorf("backup: create destination dir: %w", err)
+	}
+	store, err := sqlite.Open(*db)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.BackupTo(context.Background(), *out); err != nil {
+		return err
+	}
+	fmt.Printf("backup written to %s\n", *out)
+	return nil
+}
+
+// runIntegrity runs PRAGMA integrity_check and exits non-zero if not OK. Used by
+// the deploy to verify the database after a release (and trigger auto-heal).
+func runIntegrity(args []string) error {
+	fs := flag.NewFlagSet("integrity", flag.ExitOnError)
+	db := fs.String("db", "omni.db", "path to the SQLite database")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := sqlite.Open(*db)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	ok, problems, err := store.IntegrityCheck(context.Background())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("integrity check FAILED: %s", strings.Join(problems, "; "))
+	}
+	fmt.Println("integrity check: ok")
+	return nil
+}
+
+// runHealthcheck performs an HTTP GET and exits non-zero unless it returns 2xx.
+// Used as the container HEALTHCHECK since the distroless image has no curl/wget.
+func runHealthcheck(args []string) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
+	url := fs.String("url", "http://localhost:8080/api/v1/healthz", "URL to probe")
+	timeout := fs.Duration("timeout", 5*time.Second, "request timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: *timeout}).Get(*url)
+	if err != nil {
+		return fmt.Errorf("healthcheck: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("healthcheck: %s returned %d", *url, resp.StatusCode)
+	}
+	return nil
 }
 
 // multiFlag collects a repeatable string flag into a slice.
