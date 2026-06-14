@@ -5,8 +5,9 @@ that ships as a single Go binary with the web UI embedded. Apps ship logs over
 HTTP; logs are stored and full-text indexed in SQLite; you search, filter,
 aggregate, and live-tail through a web UI and a JSON API. Zero external services.
 
-> Status: **v1 in development.** See the design spec in
-> [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
+> Status: **v1 shipped.** See the design spec in
+> [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md)
+> and the post-v1 plan in [`ROADMAP.md`](ROADMAP.md) (53 milestones across 6 themes).
 
 ## Features (v1)
 
