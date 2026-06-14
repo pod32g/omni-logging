@@ -42,6 +42,22 @@ curl -XPOST localhost:8080/api/v1/ingest -H 'X-Api-Key: devkey' \
 open http://localhost:8080
 ```
 
+## Sending logs from your services
+
+See **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** for the full guide — HTTP
+ingest (curl/Go/Python/Node snippets), the file forwarder, and how to wire up
+dockerized services. The short version:
+
+```sh
+# structured (NDJSON): unknown keys become searchable attributes
+curl -XPOST http://HOST:8080/api/v1/ingest -H 'X-Api-Key: devkey' \
+  -H 'Content-Type: application/x-ndjson' \
+  --data-binary $'{"service":"api","level":"error","message":"boom","status":500}\n'
+
+# tail existing files into the server
+omnilog forward --server http://HOST:8080 --api-key devkey --service api --file /var/log/app.log
+```
+
 ## Query language
 
 The search box and the `q` parameter accept a small Splunk-like expression:
