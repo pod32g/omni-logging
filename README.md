@@ -120,4 +120,4 @@ make docker    # build the container image
 
 ## License
 
-TBD
+[MIT](LICENSE) © pod32g
