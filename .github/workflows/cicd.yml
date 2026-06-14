@@ -3,7 +3,9 @@ name: CI/CD
 on:
   push:
     branches: ['**']
+    paths-ignore: ['**.md', 'docs/**']   # docs-only changes don't build/deploy
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
 
 # Cancel superseded runs per ref, except on main (never cancel a main deploy).
 concurrency:
