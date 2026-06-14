@@ -18,7 +18,7 @@ jobs:
       github.event_name == 'push' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image (gate — must pass before deploy)
         run: docker compose build
 
@@ -30,7 +30,7 @@ jobs:
       group: deploy-omnilog               # serialize deploys; never overlap
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Deploy on the target (local docker — the runner is on the target)
         env:
           DEST: $HOME/omnilog
