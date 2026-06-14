@@ -15,10 +15,8 @@
 # Go
 /vendor/
 
-# Node / Vite (web UI)
-web/node_modules/
-web/dist/
-internal/web/dist/
+# Node (only if a future build step is added; the v1 UI is hand-written and committed)
+node_modules/
 
 # Editor / OS
 .DS_Store

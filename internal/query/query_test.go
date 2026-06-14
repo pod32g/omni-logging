@@ -124,13 +124,13 @@ func TestMatches(t *testing.T) {
 	mustMatch("level=info", false)
 	mustMatch("level!=info", true)
 	mustMatch("service=checkout-api timeout", true)
-	mustMatch("timeout payments", true)         // multiple terms, AND
-	mustMatch("timeout nonexistent", false)     // one term missing
-	mustMatch("attr.user_id=42", true)          // numeric attr stringified
+	mustMatch("timeout payments", true)     // multiple terms, AND
+	mustMatch("timeout nonexistent", false) // one term missing
+	mustMatch("attr.user_id=42", true)      // numeric attr stringified
 	mustMatch("attr.user_id=99", false)
-	mustMatch("attr.missing=1", false)          // missing attr, == fails
-	mustMatch("attr.missing!=1", true)          // missing attr, != passes
-	mustMatch(`"request timeout"`, true)        // phrase substring
+	mustMatch("attr.missing=1", false)   // missing attr, == fails
+	mustMatch("attr.missing!=1", true)   // missing attr, != passes
+	mustMatch(`"request timeout"`, true) // phrase substring
 }
 
 func TestMatches_TimeBounds(t *testing.T) {

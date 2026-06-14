@@ -41,13 +41,47 @@ curl -XPOST localhost:8080/api/v1/ingest -H 'X-Api-Key: devkey' \
 open http://localhost:8080
 ```
 
+## Query language
+
+The search box and the `q` parameter accept a small Splunk-like expression:
+
+- **Free text** — `timeout payments` (AND-combined, full-text via FTS5)
+- **Field filters** — `level=error service=checkout-api source=node-1`
+- **Attribute filters** — `attr.user_id=42` (or bare `user_id=42`)
+- **Negation** — `level!=debug`
+- **Quoted phrases** — `"connection refused"`
+- **Time range** — `last=15m` (`s/m/h/d`) or absolute `from`/`to` (RFC3339 / unix)
+
+Example: `level=error service=checkout-api timeout last=1h`
+
+## Architecture
+
+Single Go binary, packages under `internal/`:
+
+| Package | Responsibility |
+|---|---|
+| `model` | Canonical `LogEvent`, level/timestamp normalization, ULID |
+| `query` | Query-language parser, params builder, in-memory matcher |
+| `store` + `store/sqlite` | `Store` interface; SQLite + FTS5 implementation |
+| `ingest` | Buffered batch writer + HTTP ingest handlers |
+| `tail` | In-memory pub/sub hub + SSE handler |
+| `api` | Router, auth middleware, search/stats/health handlers |
+| `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
+| `forward` | File-tailing forwarder client |
+
+The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
+project builds with a single `go build` — no Node toolchain required. See the
+design spec in
+[`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
+
 ## Development
 
 ```sh
-make test      # Go tests
-make ui        # build the web UI into the embed dir
-make build     # build the binary with embedded UI
-make run       # run locally
+make test      # run the full Go test suite
+make vet       # go vet
+make build     # build the single binary (UI is embedded)
+make run       # build and run locally on :8080
+make docker    # build the container image
 ```
 
 ## License

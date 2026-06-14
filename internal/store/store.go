@@ -16,8 +16,8 @@ import (
 // the total number of matches and how long the query took.
 type SearchResult struct {
 	Events []model.LogEvent `json:"events"`
-	Count  int              `json:"count"`   // number of events returned
-	Total  int64            `json:"total"`   // total matches ignoring the limit
+	Count  int              `json:"count"` // number of events returned
+	Total  int64            `json:"total"` // total matches ignoring the limit
 	TookMs int64            `json:"took_ms"`
 }
 

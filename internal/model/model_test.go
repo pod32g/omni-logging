@@ -23,12 +23,12 @@ func TestParseLevel(t *testing.T) {
 		{"critical", LevelFatal},
 		{"fatal", LevelFatal},
 		{"panic", LevelFatal},
-		{"0", LevelFatal},  // syslog emergency
-		{"3", LevelError},  // syslog error
-		{"4", LevelWarn},   // syslog warning
-		{"6", LevelInfo},   // syslog info
-		{"7", LevelDebug},  // syslog debug
-		{"", LevelInfo},    // empty defaults to info
+		{"0", LevelFatal}, // syslog emergency
+		{"3", LevelError}, // syslog error
+		{"4", LevelWarn},  // syslog warning
+		{"6", LevelInfo},  // syslog info
+		{"7", LevelDebug}, // syslog debug
+		{"", LevelInfo},   // empty defaults to info
 		{"weird", LevelInfo},
 	}
 	for _, c := range cases {
