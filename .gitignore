@@ -23,3 +23,7 @@ node_modules/
 .idea/
 .vscode/
 *.swp
+
+# Local secrets (compose)
+.env
+*.env

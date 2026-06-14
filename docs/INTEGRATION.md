@@ -179,7 +179,7 @@ WantedBy=multi-user.target
 
 ## 4. Dockerized services (your setup)
 
-Your services run as containers on `runner-host`. A few options, best first:
+Your services run as containers on the deploy host. A few options, best first:
 
 ### 4a. App posts directly (preferred)
 Use Path A from inside the app. Networking options for reaching omnilog from
@@ -193,8 +193,8 @@ another container:
   # in your app's compose:  networks: [omnilog-net]
   # app then POSTs to  http://omnilog:8080/api/v1/ingest
   ```
-- **Via the host**: reach the published port at `http://<runner-host-LAN-or-tailscale-ip>:8080`
-  (e.g. the Tailscale `jump-host`/`runner-host` address), or the docker host gateway
+- **Via the host**: reach the published port at `http://<deploy-host-ip>:8080`
+  (its LAN or VPN address), or the docker host gateway
   (`host.docker.internal` on Docker Desktop; on Linux add
   `extra_hosts: ["host.docker.internal:host-gateway"]`).
 

@@ -94,7 +94,7 @@ design spec in
 ## Deployment & CI/CD
 
 A GitHub Actions workflow ([`.github/workflows/cicd.yml`](.github/workflows/cicd.yml))
-runs on a **self-hosted runner that lives on the deploy target** (the deploy target),
+runs on a **self-hosted runner that lives on the deploy target**,
 so the deploy runs local `docker` commands — no SSH hop, no stored credentials.
 
 - **`build`** — builds the image (`docker compose build`) on every push/PR; gates deploy. Fork PRs from outside the repo are not run on the self-hosted runner.

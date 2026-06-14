@@ -35,13 +35,13 @@ jobs:
       - uses: actions/checkout@v5
       - name: Deploy on the target (local docker — the runner is on the target)
         env:
-          DEST: $HOME/omnilog
           SVC: omnilog
           VOL: omnilog-data
           DBPATH: /data/omni.db
           PORT: "8080"
         run: |
           set -euo pipefail
+          DEST="$HOME/omnilog"
 
           # Sync the checked-out code into the deploy dir. No --delete: live data
           # lives in the named docker volume, never in this directory.
