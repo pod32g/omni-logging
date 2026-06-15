@@ -1,0 +1,156 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Omni-logging API",
+    "version": "1.0.0",
+    "description": "Ingest, search, aggregate, export, and live-tail logs. Ingest endpoints authenticate with an ingest API key (X-Api-Key or Bearer); query endpoints use the admin token (Bearer, ?token=, or the omnilog_token cookie). When no keys/token are configured, auth is disabled (dev mode)."
+  },
+  "servers": [{ "url": "/", "description": "This server" }],
+  "tags": [
+    { "name": "ingest" }, { "name": "query" }, { "name": "ops" }
+  ],
+  "paths": {
+    "/api/v1/ingest": {
+      "post": {
+        "tags": ["ingest"],
+        "summary": "Ingest structured events (JSON array or NDJSON)",
+        "security": [{ "ingestKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "type": "array", "items": { "type": "object" } } },
+            "application/x-ndjson": { "schema": { "type": "string" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "All accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestResponse" } } } },
+          "429": { "description": "Buffer full or admission control (rate limit / quota) rejected the request" }
+        }
+      }
+    },
+    "/api/v1/ingest/raw": {
+      "post": {
+        "tags": ["ingest"],
+        "summary": "Ingest raw text, one log line per line",
+        "security": [{ "ingestKey": [] }],
+        "parameters": [
+          { "name": "service", "in": "query", "schema": { "type": "string" } },
+          { "name": "source", "in": "query", "schema": { "type": "string" } },
+          { "name": "level", "in": "query", "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "text/plain": { "schema": { "type": "string" } } } },
+        "responses": { "200": { "description": "Accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestResponse" } } } }, "429": { "description": "Rejected" } }
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "tags": ["query"],
+        "summary": "Search events",
+        "security": [{ "adminToken": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "description": "Query expression (filters, operators, free text)", "schema": { "type": "string" } },
+          { "name": "from", "in": "query", "schema": { "type": "string" } },
+          { "name": "to", "in": "query", "schema": { "type": "string" } },
+          { "name": "last", "in": "query", "description": "Relative window e.g. 15m, 1h, 7d", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["newest", "oldest"] } },
+          { "name": "after", "in": "query", "description": "Keyset pagination cursor from a prior next_cursor", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Results", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResult" } } } } }
+      }
+    },
+    "/api/v1/search/stats": {
+      "get": {
+        "tags": ["query"],
+        "summary": "Histogram + facets for a query",
+        "security": [{ "adminToken": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "last", "in": "query", "schema": { "type": "string" } },
+          { "name": "interval", "in": "query", "description": "Histogram bucket width e.g. 1m", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Stats", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatsResult" } } } } }
+      }
+    },
+    "/api/v1/export": {
+      "get": {
+        "tags": ["query"],
+        "summary": "Stream all matching events (ignores the search limit)",
+        "security": [{ "adminToken": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "last", "in": "query", "schema": { "type": "string" } },
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["ndjson", "csv", "json"] } }
+        ],
+        "responses": { "200": { "description": "Streamed export", "content": { "application/x-ndjson": {}, "text/csv": {}, "application/json": {} } } }
+      }
+    },
+    "/api/v1/tail": {
+      "get": {
+        "tags": ["query"],
+        "summary": "Live-tail matching events as Server-Sent Events",
+        "security": [{ "adminToken": [] }],
+        "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "text/event-stream of LogEvent JSON", "content": { "text/event-stream": {} } } }
+      }
+    },
+    "/api/v1/healthz": {
+      "get": { "tags": ["ops"], "summary": "Liveness probe (always 200 if up)", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/v1/readyz": {
+      "get": { "tags": ["ops"], "summary": "Readiness probe (200 ready, 503 if store unreachable)", "responses": { "200": { "description": "Ready" }, "503": { "description": "Not ready" } } }
+    },
+    "/metrics": {
+      "get": { "tags": ["ops"], "summary": "Prometheus metrics", "responses": { "200": { "description": "Exposition", "content": { "text/plain": {} } } } }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ingestKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key" },
+      "adminToken": { "type": "http", "scheme": "bearer" }
+    },
+    "schemas": {
+      "LogEvent": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "received_at": { "type": "string", "format": "date-time" },
+          "source": { "type": "string" },
+          "service": { "type": "string" },
+          "level": { "type": "string" },
+          "message": { "type": "string" },
+          "attributes": { "type": "object", "additionalProperties": true },
+          "raw": { "type": "string" }
+        }
+      },
+      "IngestResponse": {
+        "type": "object",
+        "properties": {
+          "accepted": { "type": "integer" },
+          "rejected": { "type": "integer" },
+          "errors": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "error": { "type": "string" } } } }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "properties": {
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/LogEvent" } },
+          "count": { "type": "integer" },
+          "total": { "type": "integer" },
+          "took_ms": { "type": "integer" },
+          "next_cursor": { "type": "string" }
+        }
+      },
+      "StatsResult": {
+        "type": "object",
+        "properties": {
+          "histogram": { "type": "array", "items": { "type": "object", "properties": { "start": { "type": "string", "format": "date-time" }, "count": { "type": "integer" } } } },
+          "facets": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "object", "properties": { "value": { "type": "string" }, "count": { "type": "integer" } } } } },
+          "total": { "type": "integer" },
+          "took_ms": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

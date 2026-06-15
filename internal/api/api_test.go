@@ -355,6 +355,33 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
+func TestOpenAPIAndDocs(t *testing.T) {
+	srv, _ := newServer(t, config.Default())
+	h := srv.Handler()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/openapi.json status = %d", rr.Code)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("/openapi.json is not valid JSON: %v", err)
+	}
+	if spec["openapi"] != "3.1.0" {
+		t.Fatalf("openapi version = %v, want 3.1.0", spec["openapi"])
+	}
+	if _, ok := spec["paths"].(map[string]any)["/api/v1/search"]; !ok {
+		t.Fatal("spec missing /api/v1/search path")
+	}
+
+	drr := httptest.NewRecorder()
+	h.ServeHTTP(drr, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if drr.Code != http.StatusOK || !strings.Contains(drr.Body.String(), "redoc") {
+		t.Fatalf("/docs status=%d body lacks redoc", drr.Code)
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv, _ := newServer(t, config.Default())
 	rr := httptest.NewRecorder()

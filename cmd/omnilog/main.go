@@ -27,6 +27,8 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/forward"
 	"github.com/pod32g/omni-logging/internal/ingest"
+	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/queryclient"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
 	"github.com/pod32g/omni-logging/internal/tail"
 	"github.com/pod32g/omni-logging/internal/wal"
@@ -50,6 +52,8 @@ func main() {
 		err = runServe(os.Args[2:], logger)
 	case "forward":
 		err = runForward(os.Args[2:], logger)
+	case "query":
+		err = runQuery(os.Args[2:])
 	case "backup":
 		err = runBackup(os.Args[2:])
 	case "integrity":
@@ -77,6 +81,7 @@ func usage() {
 Commands:
   serve        Run the logging server (HTTP API + embedded web UI)
   forward      Tail one or more files and forward them to a server
+  query        Search a server from the terminal (table/JSON/NDJSON, --follow)
   backup       Write a consistent online snapshot of the database (VACUUM INTO)
   integrity    Run PRAGMA integrity_check; exit non-zero if the DB is unsound
   healthcheck  HTTP-probe a URL; exit non-zero unless it returns 2xx
@@ -291,6 +296,57 @@ func runForward(args []string, logger *slog.Logger) error {
 
 	logger.Info("omnilog forwarding", "server", *server, "files", []string(files), "service", *service)
 	return fwd.Run(ctx)
+}
+
+// runQuery searches a server from the terminal.
+func runQuery(args []string) error {
+	fs := flag.NewFlagSet("query", flag.ExitOnError)
+	var (
+		server = fs.String("server", "http://localhost:8080", "server base URL")
+		token  = fs.String("token", "", "admin token (or OMNILOG_ADMIN_TOKEN)")
+		q      = fs.String("q", "", "query expression")
+		last   = fs.String("last", "1h", "relative window (e.g. 15m, 1h, 7d; empty = all time)")
+		from   = fs.String("from", "", "absolute start (RFC3339 or unix seconds)")
+		to     = fs.String("to", "", "absolute end")
+		limit  = fs.String("limit", "", "max events to return")
+		order  = fs.String("order", "", "newest|oldest")
+		format = fs.String("format", "table", "output: table|json|ndjson")
+		follow = fs.Bool("follow", false, "stream live matching events (SSE)")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *token == "" {
+		*token = os.Getenv("OMNILOG_ADMIN_TOKEN")
+	}
+	c := &queryclient.Client{ServerURL: *server, Token: *token}
+	params := map[string]string{"q": *q, "last": *last, "from": *from, "to": *to, "limit": *limit, "order": *order}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if *follow {
+		err := c.Follow(ctx, params, func(e model.LogEvent) {
+			_ = queryclient.FormatEventLine(os.Stdout, e, *format)
+		})
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+
+	res, err := c.Search(ctx, params)
+	if err != nil {
+		return err
+	}
+	switch *format {
+	case "json":
+		return queryclient.WriteJSON(os.Stdout, res)
+	case "ndjson":
+		return queryclient.WriteNDJSON(os.Stdout, res.Events)
+	default:
+		return queryclient.WriteTable(os.Stdout, res.Events)
+	}
 }
 
 // runBackup writes a consistent online snapshot of the database to --out using
