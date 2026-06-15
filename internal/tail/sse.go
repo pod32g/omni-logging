@@ -62,6 +62,11 @@ func Handler(hub *Hub, now func() time.Time) http.HandlerFunc {
 				flusher.Flush()
 			case e, ok := <-sub.C:
 				if !ok {
+					if sub.Evicted() {
+						// Tell the client why the stream ended; it will reconnect.
+						fmt.Fprint(w, ": evicted (slow consumer; reconnecting)\n\n")
+						flusher.Flush()
+					}
 					return
 				}
 				data, err := json.Marshal(e)
