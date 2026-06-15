@@ -125,7 +125,7 @@ button { font-family: inherit; cursor: pointer; }
 .mark span { width: 3px; border-radius: 1px; background: #fff; }
 .mark span:nth-child(1) { height: 8px; }
 .mark span:nth-child(2) { height: 14px; }
-.mark span:nth-child(3) { height: 11px; background: #9DB4FF; }
+.mark span:nth-child(3) { height: 11px; background: rgba(255, 255, 255, .55); }
 .wordmark { display: flex; align-items: baseline; gap: 7px; }
 .wordmark strong { font-size: 18px; font-weight: 800; letter-spacing: -0.02em; }
 .wordmark span { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--muted); }
