@@ -19,6 +19,12 @@ defaults → file → env → flags → **DB overrides** (highest, for the mutab
 only). So once edited via the UI, that value persists and wins over file/flags;
 documented behavior.
 
+> **Operator note (precedence):** once any setting is edited via the UI/API, the
+> full mutable set is persisted as the DB overlay and thereafter **shadows the
+> config file / env / flags for all mutable fields** on every restart. Change these
+> values in the UI, not the YAML, once you've started editing them there. Clearing
+> all ingest keys disables ingest authentication (logged as a warning).
+
 ## Components
 - **`internal/settings.Manager`**: holds the current `Mutable` behind a RWMutex,
   loads the DB overlay on top of the startup base, and on `Apply` validates →

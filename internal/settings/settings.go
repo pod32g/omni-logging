@@ -97,6 +97,7 @@ func (m *Manager) RetentionDays() int {
 // Apply validates next, makes it current, persists it, and fires change hooks.
 func (m *Manager) Apply(ctx context.Context, next Mutable) error {
 	next.IngestKeys = normalizeKeys(next.IngestKeys)
+	next.LogLevel = strings.ToLower(strings.TrimSpace(next.LogLevel))
 	if err := Validate(next); err != nil {
 		return err
 	}

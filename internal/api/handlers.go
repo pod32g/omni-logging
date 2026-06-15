@@ -94,9 +94,14 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid settings JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	hadKeys := len(s.settings.IngestKeys()) > 0
 	if err := s.settings.Apply(r.Context(), next); err != nil {
 		http.Error(w, "invalid settings: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if hadKeys && len(s.settings.IngestKeys()) == 0 {
+		s.logger.Warn("ingest authentication disabled: all ingest keys cleared via settings",
+			"request_id", requestIDFromCtx(r.Context()))
 	}
 	s.logger.Info("settings updated", "request_id", requestIDFromCtx(r.Context()))
 	writeJSON(w, http.StatusOK, s.settings.Current())
