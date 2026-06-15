@@ -1,13 +1,42 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pod32g/omni-logging/internal/ingest"
+	"github.com/pod32g/omni-logging/internal/model"
 )
+
+type ctxKey int
+
+const requestIDKey ctxKey = 0
+
+// requestIDMiddleware assigns each request a request ID (honoring an inbound
+// X-Request-Id), echoes it back, and threads it through the context so logs can
+// correlate to a single request.
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-Id")
+		if id == "" {
+			id = model.NewID()
+		}
+		w.Header().Set("X-Request-Id", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))
+	})
+}
+
+func requestIDFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(requestIDKey).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // metricsMiddleware records per-request count and duration, labeled by method
 // and response status code only (no path label, to bound cardinality). The
@@ -89,6 +118,7 @@ func logMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 		logger.Info("request",
+			"request_id", requestIDFromCtx(r.Context()),
 			"method", r.Method, "path", r.URL.Path,
 			"status", rec.status, "dur_ms", time.Since(start).Milliseconds())
 	})
@@ -108,7 +138,7 @@ func (s *Server) requireIngestKey(next http.HandlerFunc) http.HandlerFunc {
 		}
 		for _, k := range s.cfg.IngestKeys {
 			if constantTimeEqual(provided, k) {
-				next(w, r)
+				next(w, r.WithContext(ingest.WithIngestKey(r.Context(), k)))
 				return
 			}
 		}

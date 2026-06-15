@@ -33,6 +33,10 @@ type ingestResponse struct {
 // is 429 and the overflow is reported as rejected.
 func (i *Ingestor) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		key, ok := i.admit(w, r)
+		if !ok {
+			return
+		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 		if err != nil {
 			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
@@ -89,6 +93,7 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 			}
 		}
 
+		i.recordUsage(key, resp.Accepted, int64(len(body)))
 		status := http.StatusOK
 		if overflow {
 			status = http.StatusTooManyRequests
@@ -102,6 +107,10 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 // (X-Service, X-Source); source falls back to the remote address.
 func (i *Ingestor) RawHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		key, ok := i.admit(w, r)
+		if !ok {
+			return
+		}
 		service := firstNonEmpty(r.URL.Query().Get("service"), r.Header.Get("X-Service"))
 		source := firstNonEmpty(r.URL.Query().Get("source"), r.Header.Get("X-Source"), clientIP(r))
 		level := model.ParseLevel(firstNonEmpty(r.URL.Query().Get("level"), "info"))
@@ -135,6 +144,11 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 			return
 		}
 
+		cl := r.ContentLength
+		if cl < 0 {
+			cl = 0
+		}
+		i.recordUsage(key, resp.Accepted, cl)
 		status := http.StatusOK
 		if overflow {
 			status = http.StatusTooManyRequests

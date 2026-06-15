@@ -90,6 +90,7 @@ func (s *Server) registerMetrics(version string) {
 		reg.NewCounterFunc("omnilog_ingest_received_total", "Events accepted into the ingest buffer.", func() float64 { return float64(s.ingestor.Metrics().Received) })
 		reg.NewCounterFunc("omnilog_ingest_written_total", "Events written durably to the store.", func() float64 { return float64(s.ingestor.Metrics().Written) })
 		reg.NewCounterFunc("omnilog_ingest_dropped_total", "Events rejected because the ingest buffer was full.", func() float64 { return float64(s.ingestor.Metrics().Dropped) })
+		reg.NewCounterFunc("omnilog_ingest_rejected_total", "Requests refused by admission control (rate limit / quota).", func() float64 { return float64(s.ingestor.Metrics().Rejected) })
 		reg.NewGaugeFunc("omnilog_ingest_queued", "Events currently buffered awaiting a write.", func() float64 { return float64(s.ingestor.Metrics().Queued) })
 	}
 	if s.hub != nil {
@@ -119,5 +120,5 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", http.FileServerFS(s.ui))
 	}
 
-	return recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux)))
+	return requestIDMiddleware(recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux))))
 }

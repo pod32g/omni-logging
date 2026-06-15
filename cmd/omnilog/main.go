@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pod32g/omni-logging/internal/admission"
 	"github.com/pod32g/omni-logging/internal/api"
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/forward"
@@ -135,6 +136,12 @@ func runServe(args []string, logger *slog.Logger) error {
 		cfg.TLSKey = *tlsKey
 	}
 
+	// Apply the configured log level now that config is resolved.
+	if lvl, ok := parseLogLevel(cfg.LogLevel); ok {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+		slog.SetDefault(logger)
+	}
+
 	store, err := sqlite.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
@@ -151,6 +158,13 @@ func runServe(args []string, logger *slog.Logger) error {
 		defer w.Close()
 	}
 
+	limiter := admission.New(admission.Limits{
+		RatePerSec:  cfg.RateLimitPerSec,
+		Burst:       cfg.RateBurst,
+		DailyEvents: cfg.DailyQuotaEvents,
+		DailyBytes:  cfg.DailyQuotaBytes,
+	}, time.Now)
+
 	hub := tail.NewHub()
 	ing := ingest.New(store, hub, ingest.Options{
 		BufferSize:    cfg.BufferSize,
@@ -158,6 +172,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		FlushInterval: time.Duration(cfg.FlushIntervalMS) * time.Millisecond,
 		Logger:        logger,
 		WAL:           w,
+		Limiter:       limiter,
 	})
 	// Replay any events accepted before a previous crash, then start the writer.
 	if w != nil {
@@ -357,6 +372,23 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+// parseLogLevel maps a config string to a slog level. ok is false for empty or
+// unrecognized values (the caller keeps the default).
+func parseLogLevel(s string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, true
+	case "info":
+		return slog.LevelInfo, true
+	case "warn", "warning":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return slog.LevelInfo, false
+	}
 }
 
 func splitCSV(s string) []string {
