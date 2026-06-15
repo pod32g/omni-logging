@@ -26,6 +26,14 @@ type Config struct {
 	FlushIntervalMS int      `yaml:"flush_interval_ms"`
 	TLSCert         string   `yaml:"tls_cert"`
 	TLSKey          string   `yaml:"tls_key"`
+
+	// Admission control (per ingest key). Zero = disabled.
+	RateLimitPerSec  float64 `yaml:"rate_limit_per_sec"` // request token refill/sec per key
+	RateBurst        int     `yaml:"rate_burst"`         // token-bucket capacity
+	DailyQuotaEvents int64   `yaml:"daily_quota_events"` // max accepted events per key per UTC day
+	DailyQuotaBytes  int64   `yaml:"daily_quota_bytes"`  // max ingested bytes per key per UTC day
+
+	LogLevel string `yaml:"log_level"` // debug|info|warn|error (default info)
 }
 
 // Default returns the baseline configuration.
@@ -37,6 +45,7 @@ func Default() Config {
 		BufferSize:      10000,
 		BatchSize:       500,
 		FlushIntervalMS: 500,
+		LogLevel:        "info",
 	}
 }
 
@@ -86,6 +95,29 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("OMNILOG_TLS_KEY"); v != "" {
 		c.TLSKey = v
+	}
+	if v := os.Getenv("OMNILOG_LOG_LEVEL"); v != "" {
+		c.LogLevel = v
+	}
+	if v := os.Getenv("OMNILOG_RATE_LIMIT_PER_SEC"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.RateLimitPerSec = f
+		}
+	}
+	if v := os.Getenv("OMNILOG_RATE_BURST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.RateBurst = n
+		}
+	}
+	if v := os.Getenv("OMNILOG_DAILY_QUOTA_EVENTS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			c.DailyQuotaEvents = n
+		}
+	}
+	if v := os.Getenv("OMNILOG_DAILY_QUOTA_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			c.DailyQuotaBytes = n
+		}
 	}
 }
 

@@ -8,10 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pod32g/omni-logging/internal/admission"
 	"github.com/pod32g/omni-logging/internal/model"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/tail"
@@ -25,7 +27,8 @@ type Options struct {
 	FlushInterval time.Duration // max time a partial batch waits before writing
 	Now           func() time.Time
 	Logger        *slog.Logger
-	WAL           *wal.WAL // durable write-ahead log; nil = in-memory only (v1 behavior)
+	WAL           *wal.WAL           // durable write-ahead log; nil = in-memory only (v1 behavior)
+	Limiter       *admission.Limiter // per-key admission control; nil = disabled
 }
 
 // queued is one buffered event plus its WAL sequence number (0 when no WAL).
@@ -57,10 +60,11 @@ func (o *Options) withDefaults() {
 // accepted events are persisted to it before Enqueue returns, so they survive a
 // process crash and are replayed into the store on restart.
 type Ingestor struct {
-	store store.Store
-	hub   *tail.Hub
-	opts  Options
-	wal   *wal.WAL
+	store   store.Store
+	hub     *tail.Hub
+	opts    Options
+	wal     *wal.WAL
+	limiter *admission.Limiter
 
 	ch chan queued
 	wg sync.WaitGroup
@@ -77,18 +81,60 @@ type Ingestor struct {
 	received atomic.Int64
 	written  atomic.Int64
 	dropped  atomic.Int64
+	rejected atomic.Int64 // requests refused by admission control (rate/quota)
 }
 
 // New creates an Ingestor. hub may be nil to disable live-tail broadcasting.
 func New(s store.Store, hub *tail.Hub, opts Options) *Ingestor {
 	opts.withDefaults()
-	return &Ingestor{
-		store: s,
-		hub:   hub,
-		opts:  opts,
-		wal:   opts.WAL,
-		ch:    make(chan queued, opts.BufferSize),
+	lim := opts.Limiter
+	if lim == nil {
+		lim = admission.New(admission.Limits{}, opts.Now) // disabled
 	}
+	return &Ingestor{
+		store:   s,
+		hub:     hub,
+		opts:    opts,
+		wal:     opts.WAL,
+		limiter: lim,
+		ch:      make(chan queued, opts.BufferSize),
+	}
+}
+
+type ctxKey int
+
+const ingestKeyCtx ctxKey = 0
+
+// WithIngestKey returns a context carrying the authenticated ingest key, so the
+// ingest handlers can attribute admission control to it.
+func WithIngestKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, ingestKeyCtx, key)
+}
+
+func ingestKeyFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(ingestKeyCtx).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// admit applies per-key admission control before a request is processed. On
+// rejection it writes a 429 with the reason and returns ok=false.
+func (i *Ingestor) admit(w http.ResponseWriter, r *http.Request) (key string, ok bool) {
+	key = ingestKeyFromCtx(r.Context())
+	bytes := r.ContentLength
+	if bytes < 0 {
+		bytes = 0
+	}
+	d := i.limiter.Allow(key, bytes)
+	if !d.Allowed {
+		i.rejected.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rejected", "reason": d.Reason})
+		return key, false
+	}
+	return key, true
 }
 
 // Start launches the background batch writer. Call Stop to drain and shut down.
@@ -271,6 +317,7 @@ type Metrics struct {
 	Received int64 `json:"received"`
 	Written  int64 `json:"written"`
 	Dropped  int64 `json:"dropped"`
+	Rejected int64 `json:"rejected"`
 	Queued   int64 `json:"queued"`
 }
 
@@ -280,6 +327,12 @@ func (i *Ingestor) Metrics() Metrics {
 		Received: i.received.Load(),
 		Written:  i.written.Load(),
 		Dropped:  i.dropped.Load(),
+		Rejected: i.rejected.Load(),
 		Queued:   int64(len(i.ch)),
 	}
+}
+
+// recordUsage attributes accepted events + ingested bytes to the key's quota.
+func (i *Ingestor) recordUsage(key string, accepted int, bytes int64) {
+	i.limiter.Record(key, int64(accepted), bytes)
 }

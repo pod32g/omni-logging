@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pod32g/omni-logging/internal/admission"
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
@@ -16,6 +17,48 @@ import (
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
 	"github.com/pod32g/omni-logging/internal/tail"
 )
+
+func TestAdmissionRateLimitThroughAPI(t *testing.T) {
+	db, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	hub := tail.NewHub()
+	// Burst of 1, effectively no refill within the test.
+	lim := admission.New(admission.Limits{RatePerSec: 0.0001, Burst: 1}, time.Now)
+	ing := ingest.New(db, hub, ingest.Options{FlushInterval: 5 * time.Millisecond, Limiter: lim})
+	ing.Start()
+	t.Cleanup(func() { ing.Stop() })
+
+	cfg := config.Default()
+	cfg.IngestKeys = []string{"devkey"}
+	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub})
+	h := srv.Handler()
+
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", strings.NewReader(`{"message":"x"}`))
+		req.Header.Set("X-Api-Key", "devkey")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+
+	if rr := post(); rr.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	rr := post()
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"reason":"rate"`) {
+		t.Fatalf("expected rate-limit reason, got %s", rr.Body.String())
+	}
+	// The request ID is echoed on every response.
+	if rr.Header().Get("X-Request-Id") == "" {
+		t.Error("missing X-Request-Id response header")
+	}
+}
 
 func newServer(t *testing.T, cfg config.Config) (*Server, *sqlite.DB) {
 	t.Helper()
