@@ -21,31 +21,9 @@ type DB struct {
 	db *sql.DB
 }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS logs (
-	id          TEXT PRIMARY KEY,
-	ts          INTEGER NOT NULL,   -- event time, unix nanoseconds
-	received_at INTEGER NOT NULL,   -- receipt time, unix nanoseconds
-	source      TEXT,
-	service     TEXT,
-	level       TEXT,
-	message     TEXT,
-	attributes  TEXT,               -- JSON object
-	raw         TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_logs_ts      ON logs(ts);
-CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
-CREATE INDEX IF NOT EXISTS idx_logs_level   ON logs(level);
-CREATE INDEX IF NOT EXISTS idx_logs_source  ON logs(source);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
-	id UNINDEXED,
-	text
-);
-`
-
-// Open opens (creating if needed) a SQLite database at path and ensures the
-// schema exists. Use ":memory:" for an ephemeral store (tests).
+// Open opens (creating if needed) a SQLite database at path and runs the
+// versioned migrations up to the latest known schema version. Use ":memory:"
+// for an ephemeral store (tests).
 func Open(path string) (*DB, error) {
 	dsn := path
 	if path != ":memory:" {
@@ -65,9 +43,9 @@ func Open(path string) (*DB, error) {
 	sqldb.SetConnMaxLifetime(0)
 	sqldb.SetConnMaxIdleTime(0)
 
-	if _, err := sqldb.ExecContext(context.Background(), schema); err != nil {
+	if err := migrate(context.Background(), sqldb); err != nil {
 		sqldb.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &DB{db: sqldb}, nil
 }

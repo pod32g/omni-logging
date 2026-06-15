@@ -75,7 +75,7 @@ Single Go binary, packages under `internal/`:
 |---|---|
 | `model` | Canonical `LogEvent`, level/timestamp normalization, ULID |
 | `query` | Query-language parser, params builder, in-memory matcher |
-| `store` + `store/sqlite` | `Store` interface; SQLite + FTS5 implementation |
+| `store` + `store/sqlite` | `Store` interface; SQLite + FTS5; versioned migrations (`PRAGMA user_version`) |
 | `ingest` | Buffered batch writer + HTTP ingest handlers |
 | `tail` | In-memory pub/sub hub + SSE handler |
 | `api` | Router, auth + metrics middleware, search/stats/health/metrics handlers |
@@ -116,6 +116,11 @@ so the deploy runs local `docker` commands — no SSH hop, no stored credentials
 
 - **`build`** — builds the image (`docker compose build`) on every push/PR; gates deploy. Fork PRs from outside the repo are not run on the self-hosted runner.
 - **`deploy`** — runs only on `main`. Because omni-logging is **stateful** (SQLite + WAL), the deploy is hardened: online `VACUUM INTO` backup → stop-first recreate → health wait → external smoke test → `PRAGMA integrity_check` → auto-heal from the latest backup if the check fails. Deploys are serialized (`concurrency: deploy-omnilog`).
+
+The schema is managed by **versioned migrations** keyed on `PRAGMA user_version`
+(audited in a `schema_migrations` table). On startup the server applies any pending
+migrations in order, each in its own transaction, and **refuses to start** against a
+database written by a newer binary — so a rollback can never silently corrupt data.
 
 The binary self-validates so the distroless image needs no extra tools:
 
