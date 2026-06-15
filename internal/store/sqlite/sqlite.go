@@ -69,6 +69,9 @@ func cachedRegexp(pattern string) (*regexp.Regexp, error) {
 		return nil, err
 	}
 	regexCacheMu.Lock()
+	if len(regexCache) >= 1024 {
+		regexCache = map[string]*regexp.Regexp{} // bound memory from many distinct patterns
+	}
 	regexCache[pattern] = re
 	regexCacheMu.Unlock()
 	return re, nil

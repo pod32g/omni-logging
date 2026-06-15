@@ -34,15 +34,26 @@ func (q Query) Matches(e model.LogEvent) bool {
 	return true
 }
 
+// matches mirrors the store's SQL execution exactly (search.go filterCond) so
+// live tail and search never disagree: equality/IN/lexical-comparison are
+// case-sensitive (SQLite's default BINARY collation), level values are
+// lowercase-normalized on both sides, glob/LIKE is ASCII case-insensitive, and
+// numeric comparison coerces like CAST(... AS REAL).
 func (f Filter) matches(e model.LogEvent) bool {
 	actual, present := f.actual(e)
+	want := f.norm(f.Value)
 
 	switch f.Op {
 	case OpExists:
-		return present && actual != ""
+		// Attribute: present with any value (matches json_extract IS NOT NULL).
+		// Field: non-empty (matches "col IS NOT NULL AND col != ''").
+		if f.Field == FieldAttr {
+			return present
+		}
+		return actual != ""
 	case OpNeq:
 		// A missing attribute satisfies !=.
-		return !present || !strings.EqualFold(actual, f.Value)
+		return !present || actual != want
 	}
 
 	if !present {
@@ -51,10 +62,10 @@ func (f Filter) matches(e model.LogEvent) bool {
 
 	switch f.Op {
 	case OpEq:
-		return strings.EqualFold(actual, f.Value)
+		return actual == want
 	case OpIn:
 		for _, v := range f.Values {
-			if strings.EqualFold(actual, v) {
+			if actual == f.norm(v) {
 				return true
 			}
 		}
@@ -65,10 +76,19 @@ func (f Filter) matches(e model.LogEvent) bool {
 		re, err := compileRegex(f.Value)
 		return err == nil && re.MatchString(actual)
 	case OpGt, OpGte, OpLt, OpLte:
-		return compareMatch(f.Op, actual, f.Value)
+		return compareMatch(f.Op, actual, want)
 	default:
-		return strings.EqualFold(actual, f.Value)
+		return actual == want
 	}
+}
+
+// norm lowercases level values to match the normalized storage (the SQL builder
+// does the same).
+func (f Filter) norm(v string) string {
+	if f.Field == FieldLevel {
+		return strings.ToLower(v)
+	}
+	return v
 }
 
 // actual returns the event's value for the filter's field and whether it is
@@ -95,12 +115,13 @@ func (f Filter) actual(e model.LogEvent) (string, bool) {
 	return "", false
 }
 
-// compareMatch evaluates a comparison operator. If both operands parse as
-// numbers it compares numerically, otherwise lexically.
+// compareMatch evaluates a comparison operator, mirroring the SQL builder: when
+// the query value is numeric, both sides are compared as numbers (the actual
+// value coerced like CAST(... AS REAL), i.e. 0 for non-numeric text); otherwise
+// a case-sensitive lexical comparison (SQLite's default BINARY collation).
 func compareMatch(op Op, actual, want string) bool {
-	af, aerr := strconv.ParseFloat(actual, 64)
-	wf, werr := strconv.ParseFloat(want, 64)
-	if aerr == nil && werr == nil {
+	if wf, err := strconv.ParseFloat(want, 64); err == nil {
+		af, _ := strconv.ParseFloat(actual, 64) // 0 on failure, like CAST AS REAL
 		switch op {
 		case OpGt:
 			return af > wf
@@ -112,7 +133,7 @@ func compareMatch(op Op, actual, want string) bool {
 			return af <= wf
 		}
 	}
-	c := strings.Compare(strings.ToLower(actual), strings.ToLower(want))
+	c := strings.Compare(actual, want)
 	switch op {
 	case OpGt:
 		return c > 0
@@ -166,10 +187,15 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 		return nil, err
 	}
 	regexCacheMu.Lock()
+	if len(regexCache) >= maxRegexCache {
+		regexCache = map[string]*regexp.Regexp{} // bound memory from many distinct patterns
+	}
 	regexCache[pattern] = re
 	regexCacheMu.Unlock()
 	return re, nil
 }
+
+const maxRegexCache = 1024
 
 // termMatches does a case-insensitive substring search across the searchable
 // text of an event: message, raw, service, source, and attribute values.
