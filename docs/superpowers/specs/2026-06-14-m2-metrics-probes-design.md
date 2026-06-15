@@ -79,8 +79,11 @@ vec child maps).
   the search/stats handlers from `res.TookMs` (keeps the store package metrics-free).
 - `omnilog_http_requests_total{method,code}` and
   `omnilog_http_request_duration_seconds{method,code}` — observed by a new metrics
-  middleware. The route **pattern** (`r.Pattern`, populated after routing on Go 1.22+)
-  is used for a `path`-free low-cardinality label set; raw paths are never labels.
+  middleware. No `path` label (raw paths would be unbounded). `method` is normalized
+  to the standard HTTP verb set (anything else → `"other"`) because the endpoints are
+  unauthenticated and the raw request method is attacker-controlled — without this an
+  attacker could grow the series set without bound. Recording runs in a `defer` so a
+  panicking handler is still counted as a `500` before `recoverMiddleware` responds.
 - `omnilog_build_info{version="..."}` gauge = 1 — handy constant for dashboards.
 
 ## Wiring

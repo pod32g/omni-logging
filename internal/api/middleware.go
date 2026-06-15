@@ -10,16 +10,44 @@ import (
 )
 
 // metricsMiddleware records per-request count and duration, labeled by method
-// and response status code only (no path label, to bound cardinality).
+// and response status code only (no path label, to bound cardinality). The
+// method is normalized to a fixed allowlist so an attacker cannot grow the
+// series set unboundedly by sending arbitrary HTTP methods (these endpoints are
+// unauthenticated by design). Recording runs in a defer so a panicking handler
+// is still counted (as a 500) before the panic propagates to recoverMiddleware.
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		method := normalizeMethod(r.Method)
+		defer func() {
+			p := recover()
+			status := rec.status
+			if p != nil {
+				status = http.StatusInternalServerError
+			}
+			code := strconv.Itoa(status)
+			s.httpReqs.With(method, code).Inc()
+			s.httpDur.With(method, code).Observe(time.Since(start).Seconds())
+			if p != nil {
+				panic(p) // let recoverMiddleware turn it into the 500 response
+			}
+		}()
 		next.ServeHTTP(rec, r)
-		code := strconv.Itoa(rec.status)
-		s.httpReqs.With(r.Method, code).Inc()
-		s.httpDur.With(r.Method, code).Observe(time.Since(start).Seconds())
 	})
+}
+
+// normalizeMethod collapses any method outside the standard HTTP set to "other"
+// to keep the metric label cardinality bounded.
+func normalizeMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+		http.MethodConnect, http.MethodTrace:
+		return m
+	default:
+		return "other"
+	}
 }
 
 // recoverMiddleware turns panics into 500s and logs them instead of crashing
