@@ -28,6 +28,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
 	"github.com/pod32g/omni-logging/internal/tail"
+	"github.com/pod32g/omni-logging/internal/wal"
 	"github.com/pod32g/omni-logging/internal/web"
 )
 
@@ -91,6 +92,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		configPath = fs.String("config", "", "path to a YAML config file")
 		addr       = fs.String("addr", "", "listen address (default :8080)")
 		db         = fs.String("db", "", "path to the SQLite database (default omni.db)")
+		walDir     = fs.String("wal-dir", "", "ingest write-ahead log dir (default <db dir>/wal)")
 		adminToken = fs.String("admin-token", "", "admin token required for query/UI (empty = open)")
 		ingestKeys = fs.String("ingest-key", "", "comma-separated ingest API keys (empty = open)")
 		retention  = fs.Int("retention-days", -1, "delete logs older than N days (0 = keep forever)")
@@ -114,6 +116,9 @@ func runServe(args []string, logger *slog.Logger) error {
 	if set["db"] {
 		cfg.DBPath = *db
 	}
+	if set["wal-dir"] {
+		cfg.WALDir = *walDir
+	}
 	if set["admin-token"] {
 		cfg.AdminToken = *adminToken
 	}
@@ -136,13 +141,34 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	defer store.Close()
 
+	// Open the ingest write-ahead log (durable accept) for file-backed databases.
+	var w *wal.WAL
+	if walDir := cfg.ResolveWALDir(); walDir != "" {
+		w, err = wal.Open(wal.Options{Dir: walDir})
+		if err != nil {
+			return fmt.Errorf("open wal: %w", err)
+		}
+		defer w.Close()
+	}
+
 	hub := tail.NewHub()
 	ing := ingest.New(store, hub, ingest.Options{
 		BufferSize:    cfg.BufferSize,
 		BatchSize:     cfg.BatchSize,
 		FlushInterval: time.Duration(cfg.FlushIntervalMS) * time.Millisecond,
 		Logger:        logger,
+		WAL:           w,
 	})
+	// Replay any events accepted before a previous crash, then start the writer.
+	if w != nil {
+		n, rerr := ing.Recover(context.Background())
+		if rerr != nil {
+			return fmt.Errorf("wal recovery: %w", rerr)
+		}
+		if n > 0 {
+			logger.Info("wal recovery: replayed accepted events", "events", n)
+		}
+	}
 	ing.Start()
 	defer ing.Stop()
 

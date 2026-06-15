@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 type Config struct {
 	Addr            string   `yaml:"addr"`
 	DBPath          string   `yaml:"db_path"`
+	WALDir          string   `yaml:"wal_dir"` // ingest write-ahead log dir (default: <dir(db)>/wal; "" + memory db = off)
 	RetentionDays   int      `yaml:"retention_days"`
 	AdminToken      string   `yaml:"admin_token"`
 	IngestKeys      []string `yaml:"ingest_keys"`
@@ -65,6 +67,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("OMNILOG_DB"); v != "" {
 		c.DBPath = v
 	}
+	if v := os.Getenv("OMNILOG_WAL_DIR"); v != "" {
+		c.WALDir = v
+	}
 	if v := os.Getenv("OMNILOG_ADMIN_TOKEN"); v != "" {
 		c.AdminToken = v
 	}
@@ -96,3 +101,16 @@ func splitCSV(s string) []string {
 
 // TLSEnabled reports whether both a cert and key are configured.
 func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }
+
+// ResolveWALDir returns the effective ingest write-ahead-log directory: the
+// explicit WALDir if set, otherwise "<dir(DBPath)>/wal" for a file database, or
+// "" for an in-memory database (no durability needed).
+func (c Config) ResolveWALDir() string {
+	if c.WALDir != "" {
+		return c.WALDir
+	}
+	if c.DBPath == "" || c.DBPath == ":memory:" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.DBPath), "wal")
+}
