@@ -1,3 +1,3 @@
 SCAN logs_fts VIRTUAL TABLE INDEX 0:M2
-SEARCH logs USING INDEX sqlite_autoindex_logs_1 (id=?)
+SEARCH logs USING INTEGER PRIMARY KEY (rowid=?)
 USE TEMP B-TREE FOR ORDER BY
