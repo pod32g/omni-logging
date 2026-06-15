@@ -107,22 +107,34 @@ func fromClause(needFTS bool) string {
 	return "FROM logs"
 }
 
-// Search executes a query and returns matching events plus the total count.
-func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, error) {
-	q.Normalize()
-	start := time.Now()
+// searchSQL builds the event-selection statement and its bound args for an
+// already-normalized query. It is separated from Search so the exact SQL can be
+// inspected (e.g. EXPLAIN QUERY PLAN in tests) without duplicating construction.
+func searchSQL(q query.Query) (string, []any) {
 	w := buildWhere(q)
-
 	order := "DESC"
 	if q.Order == query.OrderOldest {
 		order = "ASC"
 	}
-
 	sqlStr := fmt.Sprintf(
 		"SELECT logs.id, logs.ts, logs.received_at, logs.source, logs.service, logs.level, logs.message, logs.attributes, logs.raw %s %s ORDER BY logs.ts %s, logs.id %s LIMIT ?",
 		fromClause(w.needFTS), w.sql, order, order)
+	return sqlStr, append(w.args, q.Limit)
+}
 
-	rows, err := d.db.QueryContext(ctx, sqlStr, append(w.args, q.Limit)...)
+// countSQL builds the total-count statement (ignoring the limit) and its args.
+func countSQL(q query.Query) (string, []any) {
+	w := buildWhere(q)
+	return fmt.Sprintf("SELECT COUNT(*) %s %s", fromClause(w.needFTS), w.sql), w.args
+}
+
+// Search executes a query and returns matching events plus the total count.
+func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, error) {
+	q.Normalize()
+	start := time.Now()
+
+	sqlStr, args := searchSQL(q)
+	rows, err := d.db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return store.SearchResult{}, fmt.Errorf("search query: %w", err)
 	}
@@ -140,7 +152,7 @@ func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, err
 		return store.SearchResult{}, err
 	}
 
-	total, err := d.count(ctx, w)
+	total, err := d.count(ctx, q)
 	if err != nil {
 		return store.SearchResult{}, err
 	}
@@ -153,10 +165,10 @@ func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, err
 	}, nil
 }
 
-func (d *DB) count(ctx context.Context, w whereClause) (int64, error) {
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) %s %s", fromClause(w.needFTS), w.sql)
+func (d *DB) count(ctx context.Context, q query.Query) (int64, error) {
+	sqlStr, args := countSQL(q)
 	var n int64
-	if err := d.db.QueryRowContext(ctx, sqlStr, w.args...).Scan(&n); err != nil {
+	if err := d.db.QueryRowContext(ctx, sqlStr, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count query: %w", err)
 	}
 	return n, nil
@@ -186,7 +198,6 @@ func scanEvent(rows *sql.Rows) (model.LogEvent, error) {
 func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error) {
 	q.Normalize()
 	start := time.Now()
-	w := buildWhere(q)
 
 	interval := q.Interval
 	if interval <= 0 {
@@ -197,10 +208,8 @@ func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error
 	res := store.StatsResult{Facets: map[string][]store.Facet{}}
 
 	// Histogram: integer-divide ts into buckets.
-	histSQL := fmt.Sprintf(
-		"SELECT (logs.ts / %d) * %d AS bucket, COUNT(*) %s %s GROUP BY bucket ORDER BY bucket ASC",
-		bucketNanos, bucketNanos, fromClause(w.needFTS), w.sql)
-	hrows, err := d.db.QueryContext(ctx, histSQL, w.args...)
+	histSQL, histArgs := histogramSQL(q, bucketNanos)
+	hrows, err := d.db.QueryContext(ctx, histSQL, histArgs...)
 	if err != nil {
 		return store.StatsResult{}, fmt.Errorf("histogram query: %w", err)
 	}
@@ -219,7 +228,7 @@ func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error
 
 	// Facets for level and service.
 	for _, field := range []string{"level", "service"} {
-		facets, err := d.facet(ctx, w, field)
+		facets, err := d.facet(ctx, q, field)
 		if err != nil {
 			return store.StatsResult{}, err
 		}
@@ -230,12 +239,27 @@ func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error
 	return res, nil
 }
 
-// facet returns the top values and counts for a column under the given filter.
-func (d *DB) facet(ctx context.Context, w whereClause, col string) ([]store.Facet, error) {
-	sqlStr := fmt.Sprintf(
+// histogramSQL builds the time-bucketed count statement and its args.
+func histogramSQL(q query.Query, bucketNanos int64) (string, []any) {
+	w := buildWhere(q)
+	return fmt.Sprintf(
+		"SELECT (logs.ts / %d) * %d AS bucket, COUNT(*) %s %s GROUP BY bucket ORDER BY bucket ASC",
+		bucketNanos, bucketNanos, fromClause(w.needFTS), w.sql), w.args
+}
+
+// facetSQL builds the top-values statement for a column and its args. col is a
+// fixed internal column name (never user input).
+func facetSQL(q query.Query, col string) (string, []any) {
+	w := buildWhere(q)
+	return fmt.Sprintf(
 		"SELECT logs.%s AS v, COUNT(*) AS c %s %s GROUP BY v ORDER BY c DESC LIMIT 20",
-		col, fromClause(w.needFTS), w.sql)
-	rows, err := d.db.QueryContext(ctx, sqlStr, w.args...)
+		col, fromClause(w.needFTS), w.sql), w.args
+}
+
+// facet returns the top values and counts for a column under the given filter.
+func (d *DB) facet(ctx context.Context, q query.Query, col string) ([]store.Facet, error) {
+	sqlStr, args := facetSQL(q, col)
+	rows, err := d.db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, fmt.Errorf("facet %s: %w", col, err)
 	}

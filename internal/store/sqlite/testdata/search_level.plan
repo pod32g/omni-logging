@@ -1,0 +1,2 @@
+SEARCH logs USING INDEX idx_logs_level (level=?)
+USE TEMP B-TREE FOR ORDER BY

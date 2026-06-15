@@ -1,0 +1,2 @@
+SEARCH logs USING INDEX idx_logs_ts (ts>? AND ts<?)
+USE TEMP B-TREE FOR LAST TERM OF ORDER BY

@@ -41,15 +41,27 @@ type StatsResult struct {
 	TookMs    int64              `json:"took_ms"`
 }
 
-// Store persists and queries log events.
+// Store persists and queries log events. Implementations must honor the
+// contract below (enforced by the backend-agnostic suite in
+// internal/store/storetest) so the rest of the system can treat any backend
+// identically. All methods must respect context cancellation.
 type Store interface {
 	// Append durably writes a batch of events (structured row + full-text index).
+	// It is idempotent per LogEvent.ID: re-appending an event with an existing ID
+	// replaces it everywhere it is indexed (structured row AND full-text index),
+	// never creating a duplicate. Crash recovery (the ingest WAL replay) relies on
+	// this. An empty batch is a no-op.
 	Append(ctx context.Context, events []model.LogEvent) error
-	// Search returns matching events ordered per the query, plus the total count.
+	// Search returns matching events plus counts. Results are ordered newest-first
+	// by event time (ties broken by ID) unless q.Order == query.OrderOldest, and
+	// capped at q.Limit. SearchResult.Count is the number returned; Total is the
+	// number of matches ignoring the limit.
 	Search(ctx context.Context, q query.Query) (SearchResult, error)
-	// Stats returns the histogram and facets for a query.
+	// Stats returns the time-bucketed histogram (bucket width q.Interval) and the
+	// level/service facets for the events matching q.
 	Stats(ctx context.Context, q query.Query) (StatsResult, error)
-	// Purge deletes events older than the cutoff and returns how many were removed.
+	// Purge deletes events with event time strictly older than olderThan
+	// (including their full-text entries) and returns how many were removed.
 	Purge(ctx context.Context, olderThan time.Time) (int64, error)
 	// Ping verifies the backend is reachable; it powers the readiness probe.
 	Ping(ctx context.Context) error

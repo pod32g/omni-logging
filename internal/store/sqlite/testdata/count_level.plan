@@ -1,0 +1,1 @@
+SEARCH logs USING COVERING INDEX idx_logs_level (level=?)
