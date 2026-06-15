@@ -75,6 +75,9 @@ func Open(path string) (*DB, error) {
 // Close closes the underlying database.
 func (d *DB) Close() error { return d.db.Close() }
 
+// Ping verifies the database connection is alive. It powers the readiness probe.
+func (d *DB) Ping(ctx context.Context) error { return d.db.PingContext(ctx) }
+
 // Append writes a batch of events in a single transaction, updating both the
 // structured table and the full-text index.
 func (d *DB) Append(ctx context.Context, events []model.LogEvent) error {

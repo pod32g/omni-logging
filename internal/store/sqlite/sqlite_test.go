@@ -66,6 +66,13 @@ func ids(events []model.LogEvent) []string {
 	return out
 }
 
+func TestPing(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping on open DB: %v", err)
+	}
+}
+
 func TestSearch_LevelFilter(t *testing.T) {
 	db := newTestDB(t)
 	seed(t, db)

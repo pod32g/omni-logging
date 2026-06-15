@@ -153,6 +153,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		Hub:      hub,
 		UI:       web.FS(),
 		Logger:   logger,
+		Version:  version,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

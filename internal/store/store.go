@@ -51,6 +51,8 @@ type Store interface {
 	Stats(ctx context.Context, q query.Query) (StatsResult, error)
 	// Purge deletes events older than the cutoff and returns how many were removed.
 	Purge(ctx context.Context, olderThan time.Time) (int64, error)
+	// Ping verifies the backend is reachable; it powers the readiness probe.
+	Ping(ctx context.Context) error
 	// Close releases resources.
 	Close() error
 }

@@ -140,6 +140,96 @@ func TestIngestAuth(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpoint(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	seedEvent(t, db, "hello", model.LevelInfo)
+	h := srv.Handler()
+
+	// Drive a search so the store-query histogram and HTTP counters record.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=hello", nil))
+
+	mrr := httptest.NewRecorder()
+	h.ServeHTTP(mrr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if mrr.Code != http.StatusOK {
+		t.Fatalf("/metrics status = %d", mrr.Code)
+	}
+	if ct := mrr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("/metrics content-type = %q, want text/plain", ct)
+	}
+	body := mrr.Body.String()
+	for _, want := range []string{
+		"omnilog_http_requests_total",
+		"omnilog_store_query_duration_seconds",
+		"omnilog_ingest_received_total",
+		"omnilog_tail_subscribers",
+		"omnilog_build_info",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func renderMetrics(t *testing.T, srv *Server) string {
+	t.Helper()
+	var b strings.Builder
+	if err := srv.metrics.WriteProm(&b); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	return b.String()
+}
+
+func TestHTTPMetrics_MethodNormalized(t *testing.T) {
+	srv, _ := newServer(t, config.Default())
+	h := srv.Handler()
+	// An unknown but syntactically valid method must not create a per-method
+	// time series (cardinality DoS): it is collapsed to method="other".
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("WEIRDVERB", "/api/v1/healthz", nil))
+
+	out := renderMetrics(t, srv)
+	if strings.Contains(out, `method="WEIRDVERB"`) {
+		t.Fatalf("unknown method leaked as a label:\n%s", out)
+	}
+	if !strings.Contains(out, `method="other"`) {
+		t.Fatalf("unknown method not normalized to other:\n%s", out)
+	}
+}
+
+func TestMetricsMiddleware_RecordsPanicAs500(t *testing.T) {
+	srv := New(Deps{})
+	h := srv.metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+	func() {
+		defer func() { _ = recover() }() // swallow the re-panic
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	}()
+
+	out := renderMetrics(t, srv)
+	if !strings.Contains(out, `omnilog_http_requests_total{code="500",method="GET"} 1`) {
+		t.Fatalf("panic not recorded as a 500 request:\n%s", out)
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	h := srv.Handler()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("readyz healthy status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+
+	db.Close() // simulate backend loss
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz after store close status = %d, want 503", rr.Code)
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv, _ := newServer(t, config.Default())
 	rr := httptest.NewRecorder()

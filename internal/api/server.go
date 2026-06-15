@@ -10,6 +10,7 @@ import (
 
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
+	"github.com/pod32g/omni-logging/internal/metrics"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/tail"
 )
@@ -22,7 +23,9 @@ type Deps struct {
 	Hub      *tail.Hub
 	UI       fs.FS // embedded web assets
 	Logger   *slog.Logger
-	Now      func() time.Time // injectable clock (defaults to time.Now)
+	Now      func() time.Time  // injectable clock (defaults to time.Now)
+	Metrics  *metrics.Registry // metrics registry (created if nil)
+	Version  string            // build version, surfaced as omnilog_build_info
 }
 
 // Server holds API dependencies and builds the HTTP handler.
@@ -34,7 +37,15 @@ type Server struct {
 	ui       fs.FS
 	logger   *slog.Logger
 	now      func() time.Time
+
+	metrics  *metrics.Registry
+	httpReqs *metrics.CounterVec
+	httpDur  *metrics.HistogramVec
+	queryDur *metrics.HistogramVec
 }
+
+// latencyBuckets are the default duration buckets (seconds) for histograms.
+var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
 
 // New creates a Server from its dependencies.
 func New(d Deps) *Server {
@@ -44,7 +55,10 @@ func New(d Deps) *Server {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Server{
+	if d.Metrics == nil {
+		d.Metrics = metrics.NewRegistry()
+	}
+	s := &Server{
 		cfg:      d.Config,
 		store:    d.Store,
 		ingestor: d.Ingestor,
@@ -52,6 +66,35 @@ func New(d Deps) *Server {
 		ui:       d.UI,
 		logger:   d.Logger,
 		now:      d.Now,
+		metrics:  d.Metrics,
+	}
+	s.registerMetrics(d.Version)
+	return s
+}
+
+// registerMetrics wires the metric collectors. Existing counters (ingest, tail)
+// are exposed via function-backed collectors that read live values at scrape
+// time, avoiding double-bookkeeping.
+func (s *Server) registerMetrics(version string) {
+	reg := s.metrics
+	if version == "" {
+		version = "unknown"
+	}
+	reg.NewGauge("omnilog_build_info", "Build information; value is always 1.", "version").With(version).Set(1)
+
+	s.httpReqs = reg.NewCounter("omnilog_http_requests_total", "Total HTTP requests served.", "method", "code")
+	s.httpDur = reg.NewHistogram("omnilog_http_request_duration_seconds", "HTTP request duration in seconds.", latencyBuckets, "method", "code")
+	s.queryDur = reg.NewHistogram("omnilog_store_query_duration_seconds", "Store query duration in seconds.", latencyBuckets, "op")
+
+	if s.ingestor != nil {
+		reg.NewCounterFunc("omnilog_ingest_received_total", "Events accepted into the ingest buffer.", func() float64 { return float64(s.ingestor.Metrics().Received) })
+		reg.NewCounterFunc("omnilog_ingest_written_total", "Events written durably to the store.", func() float64 { return float64(s.ingestor.Metrics().Written) })
+		reg.NewCounterFunc("omnilog_ingest_dropped_total", "Events rejected because the ingest buffer was full.", func() float64 { return float64(s.ingestor.Metrics().Dropped) })
+		reg.NewGaugeFunc("omnilog_ingest_queued", "Events currently buffered awaiting a write.", func() float64 { return float64(s.ingestor.Metrics().Queued) })
+	}
+	if s.hub != nil {
+		reg.NewGaugeFunc("omnilog_tail_subscribers", "Active live-tail subscribers.", func() float64 { return float64(s.hub.SubscriberCount()) })
+		reg.NewCounterFunc("omnilog_tail_dropped_total", "Events dropped because a subscriber buffer was full.", func() float64 { return float64(s.hub.DroppedTotal()) })
 	}
 }
 
@@ -67,10 +110,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/search/stats", s.requireAdmin(s.handleStats))
 	mux.HandleFunc("GET /api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now)))
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/readyz", s.handleReady)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	if s.ui != nil {
 		mux.Handle("/", http.FileServerFS(s.ui))
 	}
 
-	return recoverMiddleware(s.logger, logMiddleware(s.logger, mux))
+	return recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux)))
 }

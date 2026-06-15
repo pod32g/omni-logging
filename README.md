@@ -78,7 +78,8 @@ Single Go binary, packages under `internal/`:
 | `store` + `store/sqlite` | `Store` interface; SQLite + FTS5 implementation |
 | `ingest` | Buffered batch writer + HTTP ingest handlers |
 | `tail` | In-memory pub/sub hub + SSE handler |
-| `api` | Router, auth middleware, search/stats/health handlers |
+| `api` | Router, auth + metrics middleware, search/stats/health/metrics handlers |
+| `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
 | `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
 | `forward` | File-tailing forwarder client |
 
@@ -86,6 +87,26 @@ The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
 project builds with a single `go build` — no Node toolchain required. See the
 design spec in
 [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
+
+## Observability
+
+The server exposes Prometheus metrics and split health probes (all unauthenticated,
+so infra probes and scrapers can reach them):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /metrics` | Prometheus text exposition: ingest counters, store query latency, live-tail subscribers/drops, HTTP request count/latency, `omnilog_build_info`. |
+| `GET /api/v1/healthz` | **Liveness** — process is up (always `200`; used by the container HEALTHCHECK and the deploy probe). |
+| `GET /api/v1/readyz` | **Readiness** — `200` only when the backend store is reachable, else `503`. |
+
+Metrics are emitted by a small in-repo registry (no `client_golang` dependency), so
+the binary stays self-contained. Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: omnilog
+    static_configs: [{ targets: ['HOST:8080'] }]
+```
 
 ## Deployment & CI/CD
 

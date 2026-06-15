@@ -14,8 +14,9 @@ import (
 
 // Hub fans out published events to matching subscribers.
 type Hub struct {
-	mu   sync.RWMutex
-	subs map[*Subscriber]struct{}
+	mu           sync.RWMutex
+	subs         map[*Subscriber]struct{}
+	droppedTotal atomic.Int64 // aggregate events dropped across all subscribers
 }
 
 // Subscriber receives events matching its query via channel C.
@@ -73,10 +74,15 @@ func (h *Hub) Publish(events ...model.LogEvent) {
 			case s.C <- e:
 			default:
 				atomic.AddInt64(&s.dropped, 1)
+				h.droppedTotal.Add(1)
 			}
 		}
 	}
 }
+
+// DroppedTotal returns the aggregate number of events dropped across all
+// subscribers because their buffers were full.
+func (h *Hub) DroppedTotal() int64 { return h.droppedTotal.Load() }
 
 // SubscriberCount returns the number of active subscribers.
 func (h *Hub) SubscriberCount() int {
