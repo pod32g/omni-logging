@@ -45,6 +45,18 @@ func TestLoad_YAMLThenEnv(t *testing.T) {
 	}
 }
 
+func TestResolveWALDir(t *testing.T) {
+	if got := (Config{DBPath: ":memory:"}).ResolveWALDir(); got != "" {
+		t.Errorf("memory db WAL dir = %q, want empty (disabled)", got)
+	}
+	if got := (Config{DBPath: "/data/omni.db"}).ResolveWALDir(); got != "/data/wal" {
+		t.Errorf("file db WAL dir = %q, want /data/wal", got)
+	}
+	if got := (Config{DBPath: "/data/omni.db", WALDir: "/custom/wal"}).ResolveWALDir(); got != "/custom/wal" {
+		t.Errorf("explicit WAL dir = %q, want /custom/wal", got)
+	}
+}
+
 func TestTLSEnabled(t *testing.T) {
 	if (Config{}).TLSEnabled() {
 		t.Error("empty config should not have TLS enabled")

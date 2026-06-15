@@ -8,7 +8,20 @@ import (
 	"github.com/pod32g/omni-logging/internal/model"
 	"github.com/pod32g/omni-logging/internal/query"
 	"github.com/pod32g/omni-logging/internal/store"
+	"github.com/pod32g/omni-logging/internal/store/storetest"
 )
+
+// TestConformance runs the backend-agnostic store contract against SQLite.
+func TestConformance(t *testing.T) {
+	storetest.Run(t, func(t *testing.T) store.Store {
+		db, err := Open(":memory:")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	})
+}
 
 func newTestDB(t *testing.T) *DB {
 	t.Helper()
