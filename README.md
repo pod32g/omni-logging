@@ -12,7 +12,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — counts-over-time histogram and field facets.
 - **Live tail** — real-time streaming of matching events (SSE).
-- **Web UI** — search, histogram, facets, expandable rows, live tail.
+- **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
 - **Minimal auth** — per-source ingest API keys + an admin token for query/UI.
 

@@ -335,5 +335,20 @@ $("#tail-pause").addEventListener("click", () => {
 });
 $("#tail-q").addEventListener("keydown", (e) => { if (e.key === "Enter") startTail(); });
 
+// ---------- theme (light / dark / system) ----------
+const THEME_ORDER = ["system", "light", "dark"];
+function currentTheme() { return document.documentElement.dataset.theme || "system"; }
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("omnilog_theme", t); } catch (e) { /* ignore */ }
+  $("#theme-toggle").title = "Theme: " + t + " (click to change)";
+}
+$("#theme-toggle").addEventListener("click", () => {
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
+  setTheme(next);
+});
+// Sync the tooltip with the theme applied by the no-flash head script.
+setTheme(currentTheme());
+
 // ---------- boot ----------
 runSearch();
