@@ -1,6 +1,7 @@
 package query
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -17,13 +18,13 @@ func TestParse_FiltersAndTerms(t *testing.T) {
 		t.Fatalf("got %d filters, want 4: %+v", len(q.Filters), q.Filters)
 	}
 	want := []Filter{
-		{Field: FieldLevel, Value: "error"},
-		{Field: FieldService, Value: "checkout-api"},
-		{Field: FieldAttr, Attr: "user_id", Value: "42"},
-		{Field: FieldSource, Negate: true, Value: "node-9"},
+		{Field: FieldLevel, Op: OpEq, Value: "error"},
+		{Field: FieldService, Op: OpEq, Value: "checkout-api"},
+		{Field: FieldAttr, Attr: "user_id", Op: OpEq, Value: "42"},
+		{Field: FieldSource, Op: OpNeq, Value: "node-9"},
 	}
 	for i, w := range want {
-		if q.Filters[i] != w {
+		if !reflect.DeepEqual(q.Filters[i], w) {
 			t.Errorf("filter[%d] = %+v, want %+v", i, q.Filters[i], w)
 		}
 	}

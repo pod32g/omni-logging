@@ -225,6 +225,14 @@ button { font-family: inherit; cursor: pointer; }
 
 .empty { padding: 48px 24px; text-align: center; color: var(--faint); font-size: 14px; }
 
+.chip:hover { border-color: var(--cobalt-bar); color: var(--ink); }
+.load-more {
+  display: block; margin: 14px auto; padding: 9px 20px; border: 1px solid var(--hairline);
+  border-radius: 8px; background: #fff; color: var(--cobalt); font-size: 13px; font-weight: 600;
+}
+.load-more:hover { background: var(--cobalt-soft); border-color: var(--cobalt-bar); }
+.load-more[hidden] { display: none; }
+
 /* ---------- Live tail extras ---------- */
 .live {
   display: flex; align-items: center; gap: 9px; height: 42px; padding: 0 18px; border-radius: 10px;

@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,9 @@ var knownFields = map[string]Field{
 	"service": FieldService,
 	"source":  FieldSource,
 	"host":    FieldSource,
+	"message": FieldMessage,
+	"msg":     FieldMessage,
+	"raw":     FieldRaw,
 }
 
 // Parse turns a query expression into filters and free-text terms. It does not
@@ -47,32 +51,54 @@ func Parse(expr string) (Query, error) {
 	return q, nil
 }
 
-// parseFilter recognizes `key=value` and `key!=value`. It returns isFilter
-// false for a bare term (no operator).
-func parseFilter(tok string) (Filter, bool, error) {
-	neg := false
-	idx := -1
-	if i := strings.Index(tok, "!="); i >= 0 {
-		idx, neg = i, true
-	} else if i := strings.Index(tok, "="); i >= 0 {
-		idx = i
+// splitOp finds the comparison operator in a filter token and returns the
+// operator string, the key (before it), the raw value (after it), and whether an
+// operator was found. The key must be non-empty (so a leading operator char,
+// e.g. ">foo", is treated as a bare term, not a filter).
+func splitOp(tok string) (op, key, val string, ok bool) {
+	for i := 0; i < len(tok); i++ {
+		if i == 0 {
+			continue // key must be non-empty
+		}
+		switch tok[i] {
+		case '!':
+			if i+1 < len(tok) && tok[i+1] == '=' {
+				return "!=", tok[:i], tok[i+2:], true
+			}
+		case '>':
+			if i+1 < len(tok) && tok[i+1] == '=' {
+				return ">=", tok[:i], tok[i+2:], true
+			}
+			return ">", tok[:i], tok[i+1:], true
+		case '<':
+			if i+1 < len(tok) && tok[i+1] == '=' {
+				return "<=", tok[:i], tok[i+2:], true
+			}
+			return "<", tok[:i], tok[i+1:], true
+		case '=':
+			if i+1 < len(tok) && tok[i+1] == '~' {
+				return "=~", tok[:i], tok[i+2:], true
+			}
+			return "=", tok[:i], tok[i+1:], true
+		}
 	}
-	if idx <= 0 { // no operator, or empty key
+	return "", "", "", false
+}
+
+// parseFilter recognizes `key OP value` for all supported operators. It returns
+// isFilter false for a bare term (no operator).
+func parseFilter(tok string) (Filter, bool, error) {
+	op, key, val, ok := splitOp(tok)
+	if !ok {
 		return Filter{}, false, nil
 	}
-
-	key := strings.TrimSpace(tok[:idx])
-	val := tok[idx:]
-	if neg {
-		val = strings.TrimPrefix(val, "!")
-	}
-	val = strings.TrimSpace(strings.TrimPrefix(val, "="))
-	val = strings.Trim(val, `"`)
+	key = strings.TrimSpace(key)
+	val = strings.Trim(strings.TrimSpace(val), `"`)
 	if key == "" {
 		return Filter{}, false, nil
 	}
 
-	f := Filter{Negate: neg, Value: val}
+	f := Filter{}
 	lower := strings.ToLower(key)
 	switch {
 	case knownFields[lower] != "":
@@ -81,14 +107,55 @@ func parseFilter(tok string) (Filter, bool, error) {
 		f.Field = FieldAttr
 		f.Attr = key[len("attr."):]
 	default:
-		// Bare key -> attribute filter (e.g. user_id=42).
 		f.Field = FieldAttr
 		f.Attr = key
 	}
 	if f.Field == FieldAttr && f.Attr == "" {
 		return Filter{}, false, fmt.Errorf("empty attribute key in filter %q", tok)
 	}
+
+	switch op {
+	case "!=":
+		f.Op, f.Value = OpNeq, val
+	case ">":
+		f.Op, f.Value = OpGt, val
+	case ">=":
+		f.Op, f.Value = OpGte, val
+	case "<":
+		f.Op, f.Value = OpLt, val
+	case "<=":
+		f.Op, f.Value = OpLte, val
+	case "=~":
+		if _, err := regexp.Compile(val); err != nil {
+			return Filter{}, false, fmt.Errorf("invalid regex in filter %q: %w", tok, err)
+		}
+		f.Op, f.Value = OpRegex, val
+	case "=":
+		switch {
+		case val == "*":
+			f.Op = OpExists
+		case strings.HasPrefix(val, "(") && strings.HasSuffix(val, ")"):
+			f.Op = OpIn
+			f.Values = splitList(val[1 : len(val)-1])
+		case strings.Contains(val, "*"):
+			f.Op, f.Value = OpLike, val
+		default:
+			f.Op, f.Value = OpEq, val
+		}
+	}
 	return f, true, nil
+}
+
+// splitList splits a comma-separated IN list, trimming spaces and quotes.
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.Trim(strings.TrimSpace(p), `"`)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type token struct {

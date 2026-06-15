@@ -73,6 +73,8 @@ $("#token-btn").addEventListener("click", () => $("#token-bar").classList.toggle
 
 // ---------- SEARCH ----------
 const rowsEl = $("#rows");
+let searchBase = "";   // the /api/v1/search URL of the current query (no limit/after)
+let searchCursor = ""; // keyset cursor for the next page, "" when exhausted
 
 function buildSearchURL(base) {
   const q = $("#q").value.trim();
@@ -87,15 +89,39 @@ function buildSearchURL(base) {
 
 async function runSearch() {
   try {
+    searchBase = buildSearchURL("/api/v1/search");
     const [res, stats] = await Promise.all([
-      api(buildSearchURL("/api/v1/search") + "&limit=200"),
+      api(searchBase + "&limit=200"),
       api(buildSearchURL("/api/v1/search/stats") + "&interval=" + bucketFor($("#range").value)),
     ]);
-    renderResults(res);
+    renderResults(res, false);
     renderStats(stats);
   } catch (e) {
     if (e.message !== "unauthorized") console.error(e);
   }
+}
+
+// loadMore appends the next keyset page to the current results.
+async function loadMore() {
+  if (!searchCursor) return;
+  try {
+    const res = await api(searchBase + "&limit=200&after=" + encodeURIComponent(searchCursor));
+    renderResults(res, true);
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error(e);
+  }
+}
+
+// download triggers an export of all matches in the given format.
+function download(format) {
+  let url = buildSearchURL("/api/v1/export") + "&format=" + format;
+  const t = token();
+  if (t) url += "&token=" + encodeURIComponent(t);
+  const a = el("a");
+  a.href = url;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // Pick a histogram bucket width appropriate to the selected range.
@@ -110,12 +136,15 @@ function bucketFor(range) {
   }
 }
 
-function renderResults(res) {
-  rowsEl.replaceChildren();
-  $("#match-count").textContent = fmtNum(res.total) + " matching events";
-  $("#match-sub").textContent = res.count < res.total ? `showing ${fmtNum(res.count)}` : "";
-  $("#search-empty").hidden = (res.events && res.events.length > 0);
+function renderResults(res, append) {
+  if (!append) rowsEl.replaceChildren();
   (res.events || []).forEach((e) => rowsEl.appendChild(renderRow(e)));
+  const shown = rowsEl.children.length;
+  $("#match-count").textContent = fmtNum(res.total) + " matching events";
+  $("#match-sub").textContent = shown < res.total ? `showing ${fmtNum(shown)}` : "";
+  $("#search-empty").hidden = shown > 0;
+  searchCursor = res.next_cursor || "";
+  $("#load-more").hidden = !searchCursor;
 }
 
 function renderRow(e) {
@@ -245,6 +274,9 @@ function facetRow(name, count, max, color, mono, queryFrag) {
 $("#search-form").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
 $("#search-btn").addEventListener("click", runSearch);
 $("#range").addEventListener("change", runSearch);
+$("#load-more").addEventListener("click", loadMore);
+$("#export-ndjson").addEventListener("click", () => download("ndjson"));
+$("#export-csv").addEventListener("click", () => download("csv"));
 $("#order-chip").addEventListener("click", () => {
   const c = $("#order-chip");
   const next = c.dataset.order === "newest" ? "oldest" : "newest";

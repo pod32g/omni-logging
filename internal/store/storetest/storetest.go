@@ -154,6 +154,56 @@ func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
 		}
 	})
 
+	t.Run("StreamReturnsAllMatches", func(t *testing.T) {
+		s := newStore(t)
+		seed(t, s)
+		var got []string
+		q, _ := query.Parse("level=error")
+		if err := s.Stream(context.Background(), q, func(e model.LogEvent) error {
+			got = append(got, e.ID)
+			return nil
+		}); err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		// d (4m) then a (1m), newest-first.
+		if len(got) != 2 || got[0] != "d" || got[1] != "a" {
+			t.Fatalf("Stream(level=error) = %v, want [d a]", got)
+		}
+	})
+
+	t.Run("PaginationIsStableAndComplete", func(t *testing.T) {
+		s := newStore(t)
+		seed(t, s)
+		seen := map[string]bool{}
+		cursor, pages := "", 0
+		for {
+			q, _ := query.Parse("")
+			q.Limit = 2
+			if cursor != "" {
+				ts, id, _ := query.DecodeCursor(cursor)
+				q.AfterTS, q.AfterID = ts, id
+			}
+			res, err := s.Search(context.Background(), q)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			for _, e := range res.Events {
+				if seen[e.ID] {
+					t.Fatalf("duplicate id %s across pages", e.ID)
+				}
+				seen[e.ID] = true
+			}
+			pages++
+			if res.NextCursor == "" || len(res.Events) == 0 || pages > 10 {
+				break
+			}
+			cursor = res.NextCursor
+		}
+		if len(seen) != 5 {
+			t.Fatalf("paged %d unique events, want 5", len(seen))
+		}
+	})
+
 	t.Run("PurgeRemovesAndCleansFTS", func(t *testing.T) {
 		s := newStore(t)
 		base := seed(t, s)
