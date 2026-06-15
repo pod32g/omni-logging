@@ -57,6 +57,13 @@ var migrations = []migration{
 		// the index so any pre-M3 rows do too. Idempotent (rebuilt from logs).
 		fn: rebuildFTSRowids,
 	},
+	{
+		version: 3,
+		name:    "settings table",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		},
+	},
 }
 
 // rebuildFTSRowids re-creates every full-text row keyed by its logs.rowid,

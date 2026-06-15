@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pod32g/omni-logging/internal/query"
+	"github.com/pod32g/omni-logging/internal/settings"
 )
 
 // handleSearch executes a search and returns matching events plus the total.
@@ -64,12 +65,46 @@ func (s *Server) buildQuery(r *http.Request) (query.Query, error) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"status":      "ok",
+		"version":     s.version,
 		"subscribers": s.hub.SubscriberCount(),
 	}
 	if s.ingestor != nil {
 		resp["ingest"] = s.ingestor.Metrics()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleConfigGet returns the current runtime-mutable settings.
+func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		http.Error(w, "settings management not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.settings.Current())
+}
+
+// handleConfigPut replaces the mutable settings (validated, persisted, hot-applied).
+func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		http.Error(w, "settings management not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	var next settings.Mutable
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&next); err != nil {
+		http.Error(w, "invalid settings JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	hadKeys := len(s.settings.IngestKeys()) > 0
+	if err := s.settings.Apply(r.Context(), next); err != nil {
+		http.Error(w, "invalid settings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if hadKeys && len(s.settings.IngestKeys()) == 0 {
+		s.logger.Warn("ingest authentication disabled: all ingest keys cleared via settings",
+			"request_id", requestIDFromCtx(r.Context()))
+	}
+	s.logger.Info("settings updated", "request_id", requestIDFromCtx(r.Context()))
+	writeJSON(w, http.StatusOK, s.settings.Current())
 }
 
 // handleReady is the readiness probe: it reports 200 only when the backend

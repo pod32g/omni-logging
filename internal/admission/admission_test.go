@@ -80,6 +80,25 @@ func TestDailyReset(t *testing.T) {
 	}
 }
 
+func TestSetLimitsAppliesLive(t *testing.T) {
+	now := time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC)
+	l := New(Limits{}, func() time.Time { return now }) // disabled
+	if !l.Allow("k", 0).Allowed || l.Enabled() {
+		t.Fatal("disabled limiter should allow everything")
+	}
+	// Tighten limits at runtime.
+	l.SetLimits(Limits{RatePerSec: 1, Burst: 1})
+	if !l.Enabled() {
+		t.Fatal("should be enabled after SetLimits")
+	}
+	if !l.Allow("k", 0).Allowed {
+		t.Fatal("first request after SetLimits should pass")
+	}
+	if d := l.Allow("k", 0); d.Allowed || d.Reason != "rate" {
+		t.Fatalf("second request should be rate-limited, got %+v", d)
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	now := time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC)
 	l := New(Limits{RatePerSec: 1, Burst: 1, DailyEvents: 2}, func() time.Time { return now })
