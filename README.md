@@ -14,6 +14,8 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Live tail** — real-time streaming of matching events (SSE).
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
+- **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
+- **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a reference UI at `/docs`.
 - **Minimal auth** — per-source ingest API keys + an admin token for query/UI.
 - **Admission control** — per-key token-bucket rate limits + daily event/byte quotas (`rate_limit_per_sec`, `rate_burst`, `daily_quota_events`, `daily_quota_bytes`; `0` = off). Rejections return `429 {reason}` and increment `omnilog_ingest_rejected_total`.
 
