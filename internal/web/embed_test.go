@@ -50,3 +50,16 @@ func TestEmbeddedUIHasExportAndPagination(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedUIHasSettings guards the Settings view is embedded.
+func TestEmbeddedUIHasSettings(t *testing.T) {
+	html := readAsset(t, "index.html")
+	for _, want := range []string{`data-view="settings"`, `id="view-settings"`, `id="cfg-save"`, `id="cfg-keys"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	if js := readAsset(t, "app.js"); !strings.Contains(js, "function loadSettings") {
+		t.Error("app.js missing loadSettings")
+	}
+}

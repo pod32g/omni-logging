@@ -41,6 +41,20 @@ async function api(path) {
   return res.json();
 }
 
+// apiSend performs a non-GET request (returns the raw Response so callers can
+// read validation error bodies).
+async function apiSend(method, path, body) {
+  const headers = { "Content-Type": "application/json" };
+  const t = token();
+  if (t) headers["Authorization"] = "Bearer " + t;
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  if (res.status === 401) {
+    $("#token-bar").classList.add("show");
+    throw new Error("unauthorized");
+  }
+  return res;
+}
+
 function fmtTs(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
@@ -51,15 +65,15 @@ function fmtTs(iso) {
 function fmtNum(n) { return (n || 0).toLocaleString("en-US"); }
 
 // ---------- view switching ----------
-const views = { search: $("#view-search"), tail: $("#view-tail") };
+const views = { search: $("#view-search"), tail: $("#view-tail"), settings: $("#view-settings") };
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("is-active"));
     btn.classList.add("is-active");
     const v = btn.dataset.view;
-    views.search.hidden = v !== "search";
-    views.tail.hidden = v !== "tail";
+    Object.entries(views).forEach(([name, elm]) => { elm.hidden = name !== v; });
     if (v === "tail") startTail(); else stopTail();
+    if (v === "settings") loadSettings();
   });
 });
 
@@ -342,6 +356,11 @@ function setTheme(t) {
   document.documentElement.dataset.theme = t;
   try { localStorage.setItem("omnilog_theme", t); } catch (e) { /* ignore */ }
   $("#theme-toggle").title = "Theme: " + t + " (click to change)";
+  reflectThemeSeg();
+}
+function reflectThemeSeg() {
+  const cur = currentTheme();
+  document.querySelectorAll("#theme-seg button").forEach((b) => b.classList.toggle("is-on", b.dataset.themeSet === cur));
 }
 $("#theme-toggle").addEventListener("click", () => {
   const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
@@ -349,6 +368,102 @@ $("#theme-toggle").addEventListener("click", () => {
 });
 // Sync the tooltip with the theme applied by the no-flash head script.
 setTheme(currentTheme());
+
+// ---------- SETTINGS ----------
+let settingsKeys = [];
+
+async function loadSettings() {
+  reflectThemeSeg();
+  $("#cfg-admintoken").value = token();
+  try {
+    const cfg = await api("/api/v1/config");
+    $("#cfg-retention").value = cfg.retention_days ?? 0;
+    $("#cfg-rate").value = cfg.rate_limit_per_sec ?? 0;
+    $("#cfg-burst").value = cfg.rate_burst ?? 0;
+    $("#cfg-qevents").value = cfg.daily_quota_events ?? 0;
+    $("#cfg-qbytes").value = cfg.daily_quota_bytes ?? 0;
+    $("#cfg-loglevel").value = cfg.log_level || "info";
+    settingsKeys = cfg.ingest_keys || [];
+    renderKeys();
+  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
+  loadStatus();
+}
+
+function renderKeys() {
+  const c = $("#cfg-keys");
+  c.replaceChildren();
+  if (!settingsKeys.length) {
+    c.appendChild(el("span", "hint", "No ingest keys — ingestion is open (dev mode)."));
+    return;
+  }
+  settingsKeys.forEach((k, i) => {
+    const chip = el("span", "key-chip");
+    chip.appendChild(el("code", null, k));
+    const x = el("button", "key-x", "×");
+    x.title = "Remove key";
+    x.addEventListener("click", () => { settingsKeys.splice(i, 1); renderKeys(); });
+    chip.appendChild(x);
+    c.appendChild(chip);
+  });
+}
+
+async function loadStatus() {
+  try {
+    const h = await api("/api/v1/healthz");
+    const g = $("#cfg-status");
+    g.replaceChildren();
+    const add = (k, v) => { g.appendChild(el("div", "st-k", k)); g.appendChild(el("div", "st-v", String(v))); };
+    add("Version", h.version || "—");
+    add("Subscribers", h.subscribers ?? 0);
+    if (h.ingest) {
+      add("Received", fmtNum(h.ingest.received));
+      add("Written", fmtNum(h.ingest.written));
+      add("Dropped", fmtNum(h.ingest.dropped));
+      add("Rejected", fmtNum(h.ingest.rejected));
+      add("Queued", fmtNum(h.ingest.queued));
+    }
+  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
+}
+
+async function saveSettings() {
+  const num = (sel) => parseInt($(sel).value, 10) || 0;
+  const body = {
+    retention_days: num("#cfg-retention"),
+    rate_limit_per_sec: parseFloat($("#cfg-rate").value) || 0,
+    rate_burst: num("#cfg-burst"),
+    daily_quota_events: num("#cfg-qevents"),
+    daily_quota_bytes: num("#cfg-qbytes"),
+    log_level: $("#cfg-loglevel").value,
+    ingest_keys: settingsKeys,
+  };
+  const msg = $("#cfg-msg");
+  try {
+    const res = await apiSend("PUT", "/api/v1/config", body);
+    if (!res.ok) {
+      msg.textContent = "Error: " + (await res.text()).trim();
+      msg.className = "cfg-msg err";
+      return;
+    }
+    const cfg = await res.json();
+    settingsKeys = cfg.ingest_keys || [];
+    renderKeys();
+    msg.textContent = "Saved.";
+    msg.className = "cfg-msg ok";
+    setTimeout(() => { msg.textContent = ""; }, 2500);
+  } catch (e) {
+    if (e.message !== "unauthorized") { msg.textContent = "Error: " + e.message; msg.className = "cfg-msg err"; }
+  }
+}
+
+$("#cfg-save").addEventListener("click", saveSettings);
+$("#cfg-key-add").addEventListener("click", () => {
+  const v = $("#cfg-key-new").value.trim();
+  if (v && !settingsKeys.includes(v)) { settingsKeys.push(v); renderKeys(); }
+  $("#cfg-key-new").value = "";
+});
+$("#cfg-key-new").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#cfg-key-add").click(); } });
+$("#cfg-token-save").addEventListener("click", () => { setToken($("#cfg-admintoken").value.trim()); loadSettings(); });
+document.querySelectorAll("#theme-seg button").forEach((b) => b.addEventListener("click", () => setTheme(b.dataset.themeSet)));
 
 // ---------- boot ----------
 runSearch();

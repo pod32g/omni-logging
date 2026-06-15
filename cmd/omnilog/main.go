@@ -29,6 +29,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
 	"github.com/pod32g/omni-logging/internal/queryclient"
+	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
 	"github.com/pod32g/omni-logging/internal/tail"
 	"github.com/pod32g/omni-logging/internal/wal"
@@ -38,12 +39,16 @@ import (
 // version is overridable at build time via -ldflags "-X main.version=...".
 var version = "0.1.0-dev"
 
+// logLevel is a runtime-adjustable level so config hot-reload can change
+// verbosity without restarting (the handler reads it on every log call).
+var logLevel = new(slog.LevelVar)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
 	var err error
@@ -141,12 +146,6 @@ func runServe(args []string, logger *slog.Logger) error {
 		cfg.TLSKey = *tlsKey
 	}
 
-	// Apply the configured log level now that config is resolved.
-	if lvl, ok := parseLogLevel(cfg.LogLevel); ok {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
-		slog.SetDefault(logger)
-	}
-
 	store, err := sqlite.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
@@ -163,12 +162,45 @@ func runServe(args []string, logger *slog.Logger) error {
 		defer w.Close()
 	}
 
+	// Runtime-mutable settings: start from the resolved config, overlay any
+	// persisted overrides, and hot-apply changes (see the Settings page / the
+	// PUT /api/v1/config endpoint) without a restart.
+	mgr := settings.NewManager(settings.Mutable{
+		RetentionDays:    cfg.RetentionDays,
+		RateLimitPerSec:  cfg.RateLimitPerSec,
+		RateBurst:        cfg.RateBurst,
+		DailyQuotaEvents: cfg.DailyQuotaEvents,
+		DailyQuotaBytes:  cfg.DailyQuotaBytes,
+		LogLevel:         cfg.LogLevel,
+		IngestKeys:       cfg.IngestKeys,
+	}, store)
+	if err := mgr.Load(context.Background()); err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	cur := mgr.Current()
+	if lvl, ok := parseLogLevel(cur.LogLevel); ok {
+		logLevel.Set(lvl)
+	}
+
 	limiter := admission.New(admission.Limits{
-		RatePerSec:  cfg.RateLimitPerSec,
-		Burst:       cfg.RateBurst,
-		DailyEvents: cfg.DailyQuotaEvents,
-		DailyBytes:  cfg.DailyQuotaBytes,
+		RatePerSec:  cur.RateLimitPerSec,
+		Burst:       cur.RateBurst,
+		DailyEvents: cur.DailyQuotaEvents,
+		DailyBytes:  cur.DailyQuotaBytes,
 	}, time.Now)
+
+	mgr.OnChange(func(m settings.Mutable) {
+		limiter.SetLimits(admission.Limits{
+			RatePerSec:  m.RateLimitPerSec,
+			Burst:       m.RateBurst,
+			DailyEvents: m.DailyQuotaEvents,
+			DailyBytes:  m.DailyQuotaBytes,
+		})
+		if lvl, ok := parseLogLevel(m.LogLevel); ok {
+			logLevel.Set(lvl)
+		}
+		logger.Info("settings applied", "retention_days", m.RetentionDays, "rate_per_sec", m.RateLimitPerSec, "log_level", m.LogLevel)
+	})
 
 	hub := tail.NewHub()
 	ing := ingest.New(store, hub, ingest.Options{
@@ -200,14 +232,15 @@ func runServe(args []string, logger *slog.Logger) error {
 		UI:       web.FS(),
 		Logger:   logger,
 		Version:  version,
+		Settings: mgr,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if cfg.RetentionDays > 0 {
-		go runRetention(ctx, store, cfg.RetentionDays, logger)
-	}
+	// Retention always runs and reads the live setting each cycle, so changes via
+	// the Settings page take effect without a restart (0 = keep forever).
+	go runRetention(ctx, store, mgr, logger)
 
 	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
 
@@ -234,10 +267,14 @@ func runServe(args []string, logger *slog.Logger) error {
 	return err
 }
 
-// runRetention periodically purges logs older than retentionDays.
-func runRetention(ctx context.Context, store *sqlite.DB, retentionDays int, logger *slog.Logger) {
+// runRetention periodically purges logs older than the live retention setting.
+func runRetention(ctx context.Context, store *sqlite.DB, mgr *settings.Manager, logger *slog.Logger) {
 	purge := func() {
-		cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		days := mgr.RetentionDays()
+		if days <= 0 {
+			return // keep forever
+		}
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 		n, err := store.Purge(ctx, cutoff)
 		if err != nil {
 			logger.Error("retention purge failed", "error", err)

@@ -26,6 +26,7 @@
     <nav class="nav">
       <button class="nav-item is-active" data-view="search">Search</button>
       <button class="nav-item" data-view="tail">Live tail</button>
+      <button class="nav-item" data-view="settings">Settings</button>
     </nav>
     <div class="account">
       <div class="env" id="env-pill"><i class="dot dot-ok"></i><span>production</span></div>
@@ -153,6 +154,65 @@
     </div>
     <div class="rows" id="stream-rows"></div>
     <div class="empty" id="tail-empty">Waiting for live events…</div>
+  </section>
+
+  <!-- SETTINGS VIEW -->
+  <section class="view" id="view-settings" hidden>
+    <div class="settings">
+      <div class="settings-col">
+        <div class="card">
+          <h3>Appearance</h3>
+          <div class="set-row">
+            <label>Theme</label>
+            <div class="seg" id="theme-seg">
+              <button data-theme-set="light">Light</button>
+              <button data-theme-set="dark">Dark</button>
+              <button data-theme-set="system">System</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Server configuration</h3>
+          <p class="hint">Changes apply live and persist across restarts.</p>
+          <div class="set-row"><label for="cfg-retention">Retention (days, 0 = keep forever)</label><input type="number" id="cfg-retention" min="0" /></div>
+          <div class="set-row"><label for="cfg-rate">Rate limit (requests/sec per key, 0 = off)</label><input type="number" id="cfg-rate" min="0" step="any" /></div>
+          <div class="set-row"><label for="cfg-burst">Rate burst</label><input type="number" id="cfg-burst" min="0" /></div>
+          <div class="set-row"><label for="cfg-qevents">Daily event quota per key (0 = off)</label><input type="number" id="cfg-qevents" min="0" /></div>
+          <div class="set-row"><label for="cfg-qbytes">Daily byte quota per key (0 = off)</label><input type="number" id="cfg-qbytes" min="0" /></div>
+          <div class="set-row"><label for="cfg-loglevel">Log level</label>
+            <select id="cfg-loglevel"><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select>
+          </div>
+          <div class="set-row">
+            <label>Ingest keys</label>
+            <div class="keys" id="cfg-keys"></div>
+          </div>
+          <div class="set-row add-key">
+            <input type="text" id="cfg-key-new" placeholder="add an ingest key" autocomplete="off" />
+            <button class="chip" id="cfg-key-add">Add</button>
+          </div>
+          <div class="set-actions">
+            <button class="btn-primary" id="cfg-save">Save changes</button>
+            <span class="cfg-msg" id="cfg-msg"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-col">
+        <div class="card">
+          <h3>Connection</h3>
+          <p class="hint">The admin token is stored in your browser to authenticate this UI — it is not a server setting and cannot be changed here.</p>
+          <div class="set-row"><label for="cfg-admintoken">Admin token</label><input type="password" id="cfg-admintoken" placeholder="admin token" /></div>
+          <div class="set-actions"><button class="chip" id="cfg-token-save">Save token</button></div>
+        </div>
+
+        <div class="card">
+          <h3>Server status</h3>
+          <div class="status-grid" id="cfg-status"><span class="hint">Loading…</span></div>
+          <div class="set-links"><a href="/docs" target="_blank" rel="noopener">API docs</a> · <a href="/metrics" target="_blank" rel="noopener">Metrics</a> · <a href="/openapi.json" target="_blank" rel="noopener">OpenAPI</a></div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <script src="app.js"></script>

@@ -11,6 +11,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/metrics"
+	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/tail"
 )
@@ -26,6 +27,7 @@ type Deps struct {
 	Now      func() time.Time  // injectable clock (defaults to time.Now)
 	Metrics  *metrics.Registry // metrics registry (created if nil)
 	Version  string            // build version, surfaced as omnilog_build_info
+	Settings *settings.Manager // runtime-mutable config (nil = static cfg only)
 }
 
 // Server holds API dependencies and builds the HTTP handler.
@@ -37,6 +39,8 @@ type Server struct {
 	ui       fs.FS
 	logger   *slog.Logger
 	now      func() time.Time
+	settings *settings.Manager
+	version  string
 
 	metrics  *metrics.Registry
 	httpReqs *metrics.CounterVec
@@ -66,6 +70,8 @@ func New(d Deps) *Server {
 		ui:       d.UI,
 		logger:   d.Logger,
 		now:      d.Now,
+		settings: d.Settings,
+		version:  d.Version,
 		metrics:  d.Metrics,
 	}
 	s.registerMetrics(d.Version)
@@ -117,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /docs", s.handleDocs)
+	mux.HandleFunc("GET /api/v1/config", s.requireAdmin(s.handleConfigGet))
+	mux.HandleFunc("PUT /api/v1/config", s.requireAdmin(s.handleConfigPut))
 
 	if s.ui != nil {
 		mux.Handle("/", http.FileServerFS(s.ui))

@@ -16,6 +16,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
 - **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a reference UI at `/docs`.
+- **Settings page** — edit retention, rate limits, quotas, log level, and ingest keys live (persisted in the DB, applied without a restart) via the UI or `GET`/`PUT /api/v1/config`. The admin token is browser-side only and not editable from the UI.
 - **Minimal auth** — per-source ingest API keys + an admin token for query/UI.
 - **Admission control** — per-key token-bucket rate limits + daily event/byte quotas (`rate_limit_per_sec`, `rate_burst`, `daily_quota_events`, `daily_quota_bytes`; `0` = off). Rejections return `429 {reason}` and increment `omnilog_ingest_rejected_total`.
 

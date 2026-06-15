@@ -58,7 +58,29 @@ func New(limits Limits, now func() time.Time) *Limiter {
 
 // Enabled reports whether any limit is active.
 func (l *Limiter) Enabled() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.enabledLocked()
+}
+
+func (l *Limiter) enabledLocked() bool {
 	return l.limits.RatePerSec > 0 || l.limits.DailyEvents > 0 || l.limits.DailyBytes > 0
+}
+
+// SetLimits replaces the active limits at runtime (config hot-reload). Existing
+// per-key buckets/counters are preserved; new limits apply on the next check.
+func (l *Limiter) SetLimits(limits Limits) {
+	burst := float64(limits.Burst)
+	if burst < 1 {
+		burst = 1
+		if limits.RatePerSec > 1 {
+			burst = limits.RatePerSec
+		}
+	}
+	l.mu.Lock()
+	l.limits = limits
+	l.burst = burst
+	l.mu.Unlock()
 }
 
 // Allow decides whether a request from key carrying up to bytes may proceed. It

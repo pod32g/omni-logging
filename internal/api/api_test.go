@@ -13,6 +13,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
+	settingspkg "github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
 	"github.com/pod32g/omni-logging/internal/tail"
@@ -353,6 +354,99 @@ func TestReadyz(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz after store close status = %d, want 503", rr.Code)
 	}
+}
+
+func TestConfigEndpointAndLiveIngestKeys(t *testing.T) {
+	db, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	hub := tail.NewHub()
+	ing := ingest.New(db, hub, ingest.Options{FlushInterval: 5 * time.Millisecond})
+	ing.Start()
+	t.Cleanup(func() { ing.Stop() })
+
+	mgr := settingspkg.NewManager(settingspkg.Mutable{RetentionDays: 14}, db)
+	if err := mgr.Load(context.Background()); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.AdminToken = "sec"
+	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub, Settings: mgr})
+	h := srv.Handler()
+
+	// GET without admin token -> 401.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("config GET without token = %d, want 401", rr.Code)
+	}
+
+	// GET with token -> current settings.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	req.Header.Set("Authorization", "Bearer sec")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config GET = %d (%s)", rr.Code, rr.Body.String())
+	}
+	var got settingspkg.Mutable
+	json.Unmarshal(rr.Body.Bytes(), &got)
+	if got.RetentionDays != 14 {
+		t.Fatalf("retention = %d, want 14", got.RetentionDays)
+	}
+
+	// Before edit, no ingest keys configured -> ingest is open (dev mode).
+	if code := ingestStatus(t, h, ""); code != http.StatusOK {
+		t.Fatalf("ingest with no keys = %d, want 200 (open)", code)
+	}
+
+	// PUT new settings (adds an ingest key + retention + log level).
+	body := `{"retention_days":30,"log_level":"warn","ingest_keys":["abc"]}`
+	rr = httptest.NewRecorder()
+	preq := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(body))
+	preq.Header.Set("Authorization", "Bearer sec")
+	h.ServeHTTP(rr, preq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config PUT = %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	// The new ingest key is live immediately: right key 200, wrong/none 401.
+	if code := ingestStatus(t, h, "abc"); code != http.StatusOK {
+		t.Fatalf("ingest with new key = %d, want 200", code)
+	}
+	if code := ingestStatus(t, h, "wrong"); code != http.StatusUnauthorized {
+		t.Fatalf("ingest with wrong key = %d, want 401", code)
+	}
+
+	// And it persisted (a fresh manager loads retention 30).
+	m2 := settingspkg.NewManager(settingspkg.Mutable{RetentionDays: 14}, db)
+	m2.Load(context.Background())
+	if m2.Current().RetentionDays != 30 {
+		t.Fatalf("persisted retention = %d, want 30", m2.Current().RetentionDays)
+	}
+
+	// Invalid PUT -> 400.
+	rr = httptest.NewRecorder()
+	bad := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(`{"retention_days":-5}`))
+	bad.Header.Set("Authorization", "Bearer sec")
+	h.ServeHTTP(rr, bad)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid PUT = %d, want 400", rr.Code)
+	}
+}
+
+func ingestStatus(t *testing.T, h http.Handler, key string) int {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", strings.NewReader(`{"message":"x"}`))
+	if key != "" {
+		req.Header.Set("X-Api-Key", key)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr.Code
 }
 
 func TestOpenAPIAndDocs(t *testing.T) {

@@ -128,7 +128,11 @@ func logMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 // disabled (dev mode). The key is read from X-Api-Key or a Bearer token.
 func (s *Server) requireIngestKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if len(s.cfg.IngestKeys) == 0 {
+		keys := s.cfg.IngestKeys
+		if s.settings != nil {
+			keys = s.settings.IngestKeys() // live: reflects edits without restart
+		}
+		if len(keys) == 0 {
 			next(w, r)
 			return
 		}
@@ -136,7 +140,7 @@ func (s *Server) requireIngestKey(next http.HandlerFunc) http.HandlerFunc {
 		if provided == "" {
 			provided = bearer(r)
 		}
-		for _, k := range s.cfg.IngestKeys {
+		for _, k := range keys {
 			if constantTimeEqual(provided, k) {
 				next(w, r.WithContext(ingest.WithIngestKey(r.Context(), k)))
 				return
