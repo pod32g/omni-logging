@@ -95,6 +95,7 @@ func (s *Server) registerMetrics(version string) {
 	if s.hub != nil {
 		reg.NewGaugeFunc("omnilog_tail_subscribers", "Active live-tail subscribers.", func() float64 { return float64(s.hub.SubscriberCount()) })
 		reg.NewCounterFunc("omnilog_tail_dropped_total", "Events dropped because a subscriber buffer was full.", func() float64 { return float64(s.hub.DroppedTotal()) })
+		reg.NewCounterFunc("omnilog_tail_evicted_total", "Subscribers evicted for being too slow.", func() float64 { return float64(s.hub.EvictedTotal()) })
 	}
 }
 

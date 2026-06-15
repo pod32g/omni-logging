@@ -71,6 +71,51 @@ func TestHub_DroppedTotalAggregates(t *testing.T) {
 	}
 }
 
+func TestHub_EvictsSlowConsumer(t *testing.T) {
+	hub := NewHubLimit(3) // evict after 3 dropped events
+	q, _ := query.Parse("")
+	sub := hub.Subscribe(q, 1) // tiny buffer fills immediately
+	defer sub.Close()
+
+	for i := 0; i < 20; i++ {
+		hub.Publish(ev(model.LevelInfo, "x"))
+	}
+
+	if hub.SubscriberCount() != 0 {
+		t.Fatalf("slow consumer not evicted: SubscriberCount = %d", hub.SubscriberCount())
+	}
+	if !sub.Evicted() {
+		t.Fatal("expected sub.Evicted() == true")
+	}
+	if hub.EvictedTotal() != 1 {
+		t.Fatalf("EvictedTotal = %d, want 1", hub.EvictedTotal())
+	}
+	// The subscriber channel is closed; a reader observes that.
+	drained := false
+	for range sub.C {
+	}
+	drained = true
+	if !drained {
+		t.Fatal("evicted subscriber channel should be closed and drainable")
+	}
+}
+
+func TestHub_NoEvictionUnderThreshold(t *testing.T) {
+	hub := NewHub() // default high threshold
+	q, _ := query.Parse("")
+	sub := hub.Subscribe(q, 2)
+	defer sub.Close()
+	for i := 0; i < 50; i++ {
+		hub.Publish(ev(model.LevelInfo, "x"))
+	}
+	if hub.SubscriberCount() != 1 {
+		t.Fatalf("subscriber wrongly evicted under default threshold: count = %d", hub.SubscriberCount())
+	}
+	if hub.EvictedTotal() != 0 {
+		t.Fatalf("EvictedTotal = %d, want 0", hub.EvictedTotal())
+	}
+}
+
 func TestHub_UnsubscribeStopsDelivery(t *testing.T) {
 	hub := NewHub()
 	q, _ := query.Parse("")
