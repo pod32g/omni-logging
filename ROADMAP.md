@@ -4,7 +4,29 @@ Post-v1 milestones. **v1 (M1) is shipped**: HTTP ingest (NDJSON/JSON/raw), SQLit
 
 > **How to read this.** Milestones are grouped into six themes that tell a rough product story, roughly in the order a single maintainer would tackle them. **IDs are stable references** (dependencies point to them), not a strict execution order — the real order is given by each milestone's *Depends on* line and effort. Effort: S (days), M (1–2 weeks), L (3–6 weeks), XL (multi-week / epic).
 
-**53 milestones** across 6 themes.
+**54 milestones** across 6 themes.
+
+## Suggested build order (priority tiers)
+
+Themes group *what* a milestone is; these tiers suggest *when* to do it. Ordered
+for turning v1 into a useful, safe tool, respecting dependencies and favoring
+high-leverage/low-effort wins. Tilted toward a self-hosted, single-user setup
+(multi-tenancy / RBAC / SSO / licensing are pushed down; collectors, analytics,
+alerting, data-safety, and UI comfort move up).
+
+**P0 — Now** (foundation, data-safety, daily-use comfort; v1-only deps)
+M3 durable write path · M19 store-interface hardening + benchmark · M26 richer query + export · M2 metrics/probes · M6 DB migrations · **M55 dark mode**
+
+**P1 — Next** (capability + easy onramps)
+M27 aggregations · M28 saved searches/jobs · M14 parsing framework · M15 grok extraction · M12 syslog · M10 compression/gRPC · M11 OTLP · M9 forwarder spool · M47 tail-hub hardening · M4 quotas · M5 hot-reload · M7 backup/DR · M39 OpenAPI+CLI · M40 SDKs · M8 release automation · M20 read-concurrency
+
+**P2 — Later** (scale, dashboards, alerting, ecosystem, light auth)
+M29 dashboards · M30–M32 alerting + anomaly · M49 object-store · M21/M22/M23/M24 tiering & cost · M25 ClickHouse · M13 Fluent/Beats · M16 redaction · M17 schema-on-read · M18 k8s autodiscovery · M50 replay · M41 export · M42 importers · M43 Grafana · M44/M45 packaging · M48 e2e/chaos · M51 query-lang spec · M52 trace correlation · M33/M34/M36/M37 identity/RBAC/audit/SSO
+
+**P3 — Eventually** (heavy scale & enterprise)
+M46 HA/clustering · M35 multi-tenancy · M38 data protection/compliance · M53 metering/licensing · M54 accessibility + i18n
+
+> **Top 3 to start:** M3 (don't lose logs), M26 (powerful search), M27 (aggregations/charts) — plus M55 (dark mode) as a quick comfort win.
 
 
 ## Production Hardening
@@ -300,6 +322,11 @@ Provide a built-in updater for binary installs and a Terraform module for cloud 
 *Effort: M · 1–2 wks · Depends on: M29*
 
 Make the web UI keyboard-navigable and screen-reader compatible to WCAG 2.1 AA (focus management for the dashboard builder and charts), and extract user-facing strings for i18n/localization.
+
+### M55 — Dark mode & theming (light / dark / system)
+*Effort: S · days · Depends on: v1*
+
+A dark theme plus a light/dark/system toggle persisted in the browser, honoring `prefers-color-scheme`. The UI already drives every color through CSS custom properties, so this is a second variable set and a small toggle — high comfort payoff for an interface people stare at for hours. Prioritized **P0**.
 
 
 ## Cross-cutting sequencing notes
