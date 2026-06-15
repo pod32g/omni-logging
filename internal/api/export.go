@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/pod32g/omni-logging/internal/model"
@@ -89,8 +90,9 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request, q query.Query
 			attrs = string(b)
 		}
 		if err := cw.Write([]string{
-			e.Timestamp.UTC().Format(time.RFC3339Nano),
-			string(e.Level), e.Service, e.Source, e.Message, attrs,
+			csvSafeCell(e.Timestamp.UTC().Format(time.RFC3339Nano)),
+			csvSafeCell(string(e.Level)), csvSafeCell(e.Service), csvSafeCell(e.Source),
+			csvSafeCell(e.Message), csvSafeCell(attrs),
 		}); err != nil {
 			return err
 		}
@@ -107,4 +109,16 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request, q query.Query
 	if err != nil {
 		s.logger.Error("export csv failed", "error", err)
 	}
+}
+
+// csvSafeCell prevents spreadsheet applications from interpreting untrusted
+// log values as formulas while preserving the visible value for human review.
+func csvSafeCell(s string) string {
+	if s == "" {
+		return s
+	}
+	if strings.ContainsRune("=+-@\t\r\n", rune(s[0])) {
+		return "'" + s
+	}
+	return s
 }

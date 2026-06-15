@@ -20,7 +20,7 @@ jobs:
       github.event_name == 'push' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Build image (gate — must pass before deploy)
         run: docker compose build
 
@@ -32,13 +32,14 @@ jobs:
       group: deploy-omnilog               # serialize deploys; never overlap
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Deploy on the target (local docker — the runner is on the target)
         env:
           SVC: omnilog
           VOL: omnilog-data
           DBPATH: /data/omni.db
           PORT: "8080"
+          BUSYBOX: busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
         run: |
           set -euo pipefail
           DEST="$HOME/omnilog"
@@ -50,6 +51,12 @@ jobs:
           cd "$DEST"
 
           ts="$(date +%Y%m%d-%H%M%S)"
+
+          # The runtime image executes as distroless nonroot (65532). Existing
+          # volumes may have been created by the previous root-running image.
+          fix_volume_owner() {
+            docker run --rm -v "$VOL":/data "$BUSYBOX" chown -R 65532:65532 /data
+          }
 
           # crash-loop guard: a wedged/restarting container on the runner's own
           # box can starve the deploy, so stop it before doing anything else.
@@ -74,6 +81,7 @@ jobs:
 
           # stop-first, then recreate: old and new must never hold the DB at once.
           docker compose stop "$SVC" 2>/dev/null || true
+          fix_volume_owner
           docker compose up --build -d "$SVC"
 
           # wait for readiness (probe from inside; distroless binary self-checks).
@@ -99,8 +107,9 @@ jobs:
             if [ -z "$latest" ]; then echo "no backup available to restore"; exit 1; fi
             docker compose stop "$SVC" || true
             # Surgery on the named volume needs a shell the distroless image lacks.
-            docker run --rm -v "$VOL":/data -v "$DEST/backups":/backups busybox \
+            docker run --rm -v "$VOL":/data -v "$DEST/backups":/backups "$BUSYBOX" \
               sh -c "cp \"/backups/$(basename "$latest")\" /data/omni.db && rm -f /data/omni.db-wal /data/omni.db-shm"
+            fix_volume_owner
             docker compose up -d "$SVC"
             for i in $(seq 1 30); do
               docker compose exec -T "$SVC" /omnilog healthcheck --url "http://localhost:8080/api/v1/healthz" >/dev/null 2>&1 && break

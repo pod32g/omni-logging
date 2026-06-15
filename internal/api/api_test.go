@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +190,33 @@ func TestExportEndpoint(t *testing.T) {
 	}
 }
 
+func TestCSVExportNeutralizesFormulas(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	e := model.LogEvent{Service: "=service", Source: "+source", Level: model.LevelInfo, Message: "@formula"}
+	e.Normalize(time.Now())
+	if err := db.Append(context.Background(), []model.LogEvent{e}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/export?format=csv", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	records, err := csv.NewReader(strings.NewReader(rr.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse CSV: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("CSV records = %d, want 2", len(records))
+	}
+	for i, want := range []string{"'=service", "'+source", "'@formula"} {
+		if got := records[1][i+2]; got != want {
+			t.Errorf("cell %d = %q, want %q", i+2, got, want)
+		}
+	}
+}
+
 func TestStatsEndpoint(t *testing.T) {
 	srv, db := newServer(t, config.Default())
 	seedEvent(t, db, "a", model.LevelError)
@@ -276,7 +304,9 @@ func TestMetricsEndpoint(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=hello", nil))
 
 	mrr := httptest.NewRecorder()
-	h.ServeHTTP(mrr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	mreq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	mreq.RemoteAddr = "127.0.0.1:12345"
+	h.ServeHTTP(mrr, mreq)
 	if mrr.Code != http.StatusOK {
 		t.Fatalf("/metrics status = %d", mrr.Code)
 	}
@@ -294,6 +324,39 @@ func TestMetricsEndpoint(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestMetricsEndpointRejectsRemoteClientsByDefault(t *testing.T) {
+	srv, _ := newServer(t, config.Default())
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "100.101.214.34:54321"
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("remote /metrics status = %d, want 404", rr.Code)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	srv, _ := newServer(t, config.Default())
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil))
+
+	for name, want := range map[string]string{
+		"Content-Security-Policy":    contentSecurityPolicy,
+		"X-Content-Type-Options":     "nosniff",
+		"X-Frame-Options":            "DENY",
+		"Referrer-Policy":            "no-referrer",
+		"Permissions-Policy":         "camera=(), microphone=(), geolocation=()",
+		"Cross-Origin-Opener-Policy": "same-origin",
+	} {
+		if got := rr.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if strings.Contains(rr.Header().Get("Content-Security-Policy"), "unsafe-") {
+		t.Fatal("CSP must not permit unsafe-inline or unsafe-eval")
 	}
 }
 
@@ -474,6 +537,12 @@ func TestOpenAPIAndDocs(t *testing.T) {
 	if drr.Code != http.StatusOK || !strings.Contains(drr.Body.String(), "redoc") {
 		t.Fatalf("/docs status=%d body lacks redoc", drr.Code)
 	}
+	if got := drr.Header().Get("Content-Security-Policy"); got != docsContentSecurityPolicy {
+		t.Fatalf("/docs CSP = %q, want %q", got, docsContentSecurityPolicy)
+	}
+	if strings.Contains(drr.Body.String(), "<style") {
+		t.Fatal("/docs contains an unnecessary inline style block")
+	}
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -482,5 +551,8 @@ func TestHealthEndpoint(t *testing.T) {
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"status":"ok"`) {
 		t.Fatalf("health = %d %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "ingest") || strings.Contains(rr.Body.String(), "subscribers") {
+		t.Fatalf("health endpoint leaked operational details: %s", rr.Body.String())
 	}
 }

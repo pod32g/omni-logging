@@ -24,6 +24,7 @@ type Config struct {
 	BufferSize      int      `yaml:"buffer_size"`
 	BatchSize       int      `yaml:"batch_size"`
 	FlushIntervalMS int      `yaml:"flush_interval_ms"`
+	MetricsPublic   bool     `yaml:"metrics_public"`
 	TLSCert         string   `yaml:"tls_cert"`
 	TLSKey          string   `yaml:"tls_key"`
 
@@ -88,6 +89,11 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("OMNILOG_RETENTION_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.RetentionDays = n
+		}
+	}
+	if v := os.Getenv("OMNILOG_METRICS_PUBLIC"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			c.MetricsPublic = enabled
 		}
 	}
 	if v := os.Getenv("OMNILOG_TLS_CERT"); v != "" {

@@ -107,12 +107,13 @@ design spec in
 
 ## Observability
 
-The server exposes Prometheus metrics and split health probes (all unauthenticated,
-so infra probes and scrapers can reach them):
+The server exposes Prometheus metrics and split health probes. Health probes are
+unauthenticated and intentionally minimal. Metrics are loopback-only by default;
+set `--metrics-public` or `OMNILOG_METRICS_PUBLIC=true` only on a trusted network.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /metrics` | Prometheus text exposition: ingest counters, store query latency, live-tail subscribers/drops, HTTP request count/latency, `omnilog_build_info`. |
+| `GET /metrics` | Prometheus text exposition: ingest counters, store query latency, live-tail subscribers/drops, HTTP request count/latency, `omnilog_build_info` (loopback-only by default). |
 | `GET /api/v1/healthz` | **Liveness** — process is up (always `200`; used by the container HEALTHCHECK and the deploy probe). |
 | `GET /api/v1/readyz` | **Readiness** — `200` only when the backend store is reachable, else `503`. |
 

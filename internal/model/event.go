@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxFutureTimestampSkew = 24 * time.Hour
+
 // LogEvent is the canonical, normalized representation of a single log record
 // once it has been accepted by the system.
 type LogEvent struct {
@@ -70,9 +72,9 @@ func EventFromJSON(data []byte, now time.Time) (LogEvent, error) {
 		return nil, false
 	}
 
-	if v, ok := get("id"); ok {
-		_ = json.Unmarshal(v, &e.ID)
-	}
+	// Canonical IDs are always assigned by the server. The store uses IDs for
+	// WAL replay idempotency, so accepting caller-controlled IDs here would let a
+	// producer replace an existing historical event.
 	if v, ok := get("source", "host", "hostname"); ok {
 		e.Source = jsonToString(v)
 	}
@@ -92,6 +94,9 @@ func EventFromJSON(data []byte, now time.Time) (LogEvent, error) {
 		t, err := parseTimestamp(v)
 		if err != nil {
 			return LogEvent{}, fmt.Errorf("invalid timestamp: %w", err)
+		}
+		if t.After(now.Add(maxFutureTimestampSkew)) {
+			return LogEvent{}, fmt.Errorf("invalid timestamp: more than %s in the future", maxFutureTimestampSkew)
 		}
 		e.Timestamp = t
 	}

@@ -120,7 +120,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now)))
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/readyz", s.handleReady)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	metricsHandler := http.Handler(http.HandlerFunc(s.handleMetrics))
+	if !s.cfg.MetricsPublic {
+		metricsHandler = loopbackOnly(metricsHandler)
+	}
+	mux.Handle("GET /metrics", metricsHandler)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("GET /api/v1/config", s.requireAdmin(s.handleConfigGet))
@@ -130,5 +134,5 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", http.FileServerFS(s.ui))
 	}
 
-	return requestIDMiddleware(recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux))))
+	return requestIDMiddleware(securityHeaders(recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux)))))
 }

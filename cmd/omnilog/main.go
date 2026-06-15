@@ -107,6 +107,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		adminToken = fs.String("admin-token", "", "admin token required for query/UI (empty = open)")
 		ingestKeys = fs.String("ingest-key", "", "comma-separated ingest API keys (empty = open)")
 		retention  = fs.Int("retention-days", -1, "delete logs older than N days (0 = keep forever)")
+		metricsPub = fs.Bool("metrics-public", false, "allow /metrics from non-loopback clients")
 		tlsCert    = fs.String("tls-cert", "", "TLS certificate file (enables HTTPS with -tls-key)")
 		tlsKey     = fs.String("tls-key", "", "TLS key file")
 	)
@@ -138,6 +139,9 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	if set["retention-days"] {
 		cfg.RetentionDays = *retention
+	}
+	if set["metrics-public"] {
+		cfg.MetricsPublic = *metricsPub
 	}
 	if set["tls-cert"] {
 		cfg.TLSCert = *tlsCert
@@ -242,7 +246,7 @@ func runServe(args []string, logger *slog.Logger) error {
 	// the Settings page take effect without a restart (0 = keep forever).
 	go runRetention(ctx, store, mgr, logger)
 
-	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Handler()}
+	httpSrv := newHTTPServer(cfg.Addr, srv.Handler())
 
 	go func() {
 		<-ctx.Done()
@@ -265,6 +269,18 @@ func runServe(args []string, logger *slog.Logger) error {
 		return nil
 	}
 	return err
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+		// WriteTimeout stays unset because live-tail and exports intentionally stream.
+	}
 }
 
 // runRetention periodically purges logs older than the live retention setting.

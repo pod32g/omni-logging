@@ -26,6 +26,7 @@ func TestLoad_YAMLThenEnv(t *testing.T) {
 
 	t.Setenv("OMNILOG_ADDR", ":7000") // env overrides file
 	t.Setenv("OMNILOG_INGEST_KEYS", "a,b,c")
+	t.Setenv("OMNILOG_METRICS_PUBLIC", "true")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -42,6 +43,9 @@ func TestLoad_YAMLThenEnv(t *testing.T) {
 	}
 	if len(cfg.IngestKeys) != 3 {
 		t.Errorf("IngestKeys = %v, want 3 from env", cfg.IngestKeys)
+	}
+	if !cfg.MetricsPublic {
+		t.Error("MetricsPublic = false, want true from env")
 	}
 }
 

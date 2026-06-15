@@ -137,6 +137,27 @@ func TestEventFromJSON_DefaultsAndNumericTime(t *testing.T) {
 	}
 }
 
+func TestEventFromJSON_IgnoresClientID(t *testing.T) {
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	e, err := EventFromJSON([]byte(`{"id":"existing-event","message":"replacement"}`), now)
+	if err != nil {
+		t.Fatalf("EventFromJSON error: %v", err)
+	}
+	if e.ID == "" || e.ID == "existing-event" {
+		t.Fatalf("ID = %q, want a server-generated ID", e.ID)
+	}
+}
+
+func TestEventFromJSON_RejectsFarFutureTimestamp(t *testing.T) {
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	if _, err := EventFromJSON([]byte(`{"timestamp":"2026-06-16T12:00:01Z"}`), now); err == nil {
+		t.Fatal("expected timestamp beyond the allowed future skew to be rejected")
+	}
+	if _, err := EventFromJSON([]byte(`{"timestamp":"2026-06-15T12:00:00Z"}`), now); err != nil {
+		t.Fatalf("timestamp at the allowed future skew was rejected: %v", err)
+	}
+}
+
 func TestEventFromJSON_Invalid(t *testing.T) {
 	now := time.Now()
 	if _, err := EventFromJSON([]byte(`not json`), now); err == nil {

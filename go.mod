@@ -1,6 +1,6 @@
 module github.com/pod32g/omni-logging
 
-go 1.25.4
+go 1.25.11
 
 require modernc.org/sqlite v1.52.0
 

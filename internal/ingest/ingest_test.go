@@ -198,6 +198,36 @@ func TestIngest_NDJSON_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestIngest_ClientIDsCannotOverwriteEvents(t *testing.T) {
+	db := newStore(t)
+	ing := New(db, nil, Options{FlushInterval: 5 * time.Millisecond})
+	ing.Start()
+
+	body := strings.Join([]string{
+		`{"id":"shared-client-id","message":"first"}`,
+		`{"id":"shared-client-id","message":"second"}`,
+	}, "\n")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	ing.Handler()(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	ing.Stop()
+
+	q, _ := query.Parse("")
+	res, err := db.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.Total != 2 || len(res.Events) != 2 {
+		t.Fatalf("stored events = %d/%d, want 2 unique events", len(res.Events), res.Total)
+	}
+	if res.Events[0].ID == res.Events[1].ID || res.Events[0].ID == "shared-client-id" || res.Events[1].ID == "shared-client-id" {
+		t.Fatalf("client-controlled IDs were retained: %q, %q", res.Events[0].ID, res.Events[1].ID)
+	}
+}
+
 func TestIngest_JSONArray(t *testing.T) {
 	db := newStore(t)
 	ing := New(db, nil, Options{FlushInterval: 10 * time.Millisecond})

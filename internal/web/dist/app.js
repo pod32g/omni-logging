@@ -126,16 +126,38 @@ async function loadMore() {
   }
 }
 
-// download triggers an export of all matches in the given format.
-function download(format) {
-  let url = buildSearchURL("/api/v1/export") + "&format=" + format;
+// download triggers an export of all matches in the given format. The admin
+// token goes in the Authorization header (never the URL query string, which
+// would leak it into browser history, Referer headers, and proxy access logs),
+// so we fetch the export and save it from a Blob URL rather than navigating an
+// <a> to the endpoint. The whole response is buffered in memory before saving —
+// fine for an admin UI, and the cost of keeping the token out of the URL.
+async function download(format) {
+  const url = buildSearchURL("/api/v1/export") + "&format=" + format;
+  const headers = {};
   const t = token();
-  if (t) url += "&token=" + encodeURIComponent(t);
-  const a = el("a");
-  a.href = url;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  if (t) headers["Authorization"] = "Bearer " + t;
+  try {
+    const res = await fetch(url, { headers });
+    if (res.status === 401) {
+      $("#token-bar").classList.add("show");
+      return;
+    }
+    if (!res.ok) throw new Error("export failed: " + res.status);
+    const blob = await res.blob();
+    const objURL = URL.createObjectURL(blob);
+    const a = el("a");
+    a.href = objURL;
+    a.download = "omnilog-export." + format;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Defer revocation so the browser has started the download before the URL
+    // is invalidated (revoking synchronously can cancel it in some browsers).
+    setTimeout(() => URL.revokeObjectURL(objURL), 0);
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // Pick a histogram bucket width appropriate to the selected range.

@@ -60,18 +60,10 @@ func (s *Server) buildQuery(r *http.Request) (query.Query, error) {
 	return p.Build(s.now())
 }
 
-// handleHealth reports liveness and ingest metrics. It requires no auth so it
-// can be used as a load-balancer health check.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
-		"status":      "ok",
-		"version":     s.version,
-		"subscribers": s.hub.SubscriberCount(),
-	}
-	if s.ingestor != nil {
-		resp["ingest"] = s.ingestor.Metrics()
-	}
-	writeJSON(w, http.StatusOK, resp)
+// handleHealth intentionally returns only liveness state; detailed operational
+// data belongs on the loopback-only metrics endpoint.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleConfigGet returns the current runtime-mutable settings.
