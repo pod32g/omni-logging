@@ -15,10 +15,11 @@ import (
 // SearchResult is the outcome of a Search: the (limited) matching events plus
 // the total number of matches and how long the query took.
 type SearchResult struct {
-	Events []model.LogEvent `json:"events"`
-	Count  int              `json:"count"` // number of events returned
-	Total  int64            `json:"total"` // total matches ignoring the limit
-	TookMs int64            `json:"took_ms"`
+	Events     []model.LogEvent `json:"events"`
+	Count      int              `json:"count"` // number of events returned
+	Total      int64            `json:"total"` // total matches ignoring the limit
+	TookMs     int64            `json:"took_ms"`
+	NextCursor string           `json:"next_cursor,omitempty"` // keyset cursor for the next page (empty = no more)
 }
 
 // Bucket is a single histogram column: a count of events in [Start, Start+width).
@@ -55,8 +56,14 @@ type Store interface {
 	// Search returns matching events plus counts. Results are ordered newest-first
 	// by event time (ties broken by ID) unless q.Order == query.OrderOldest, and
 	// capped at q.Limit. SearchResult.Count is the number returned; Total is the
-	// number of matches ignoring the limit.
+	// number of matches ignoring the limit. When q sets a keyset cursor
+	// (AfterTS/AfterID) results continue after it; NextCursor carries the cursor
+	// for the following page.
 	Search(ctx context.Context, q query.Query) (SearchResult, error)
+	// Stream invokes fn for every event matching q, in the query's sort order,
+	// without buffering the whole result set (powering exports decoupled from the
+	// search limit). q.Limit is ignored; q.From/To/filters/cursor are honored.
+	Stream(ctx context.Context, q query.Query, fn func(model.LogEvent) error) error
 	// Stats returns the time-bucketed histogram (bucket width q.Interval) and the
 	// level/service facets for the events matching q.
 	Stats(ctx context.Context, q query.Query) (StatsResult, error)

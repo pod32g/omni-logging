@@ -86,6 +86,8 @@
             <span id="match-sub"></span>
           </div>
           <div class="rt-right">
+            <button class="chip" id="export-ndjson" title="Download all matches as NDJSON">Export NDJSON</button>
+            <button class="chip" id="export-csv" title="Download all matches as CSV">Export CSV</button>
             <div class="chip" id="order-chip" data-order="newest">
               <span>Newest first</span>
               <svg class="ico-sm" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
@@ -100,6 +102,7 @@
           <span class="c-msg">MESSAGE</span>
         </div>
         <div class="rows" id="rows"></div>
+        <button class="load-more" id="load-more" hidden>Load more</button>
         <div class="empty" id="search-empty" hidden>No matching events. Adjust your query or time range.</div>
       </div>
     </div>

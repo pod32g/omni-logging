@@ -54,6 +54,7 @@ func (s *Server) buildQuery(r *http.Request) (query.Query, error) {
 		Limit:    v.Get("limit"),
 		Order:    v.Get("order"),
 		Interval: v.Get("interval"),
+		After:    v.Get("after"),
 	}
 	return p.Build(s.now())
 }

@@ -63,6 +63,88 @@ func TestSearchEndpoint(t *testing.T) {
 	}
 }
 
+func TestSearchPaginationEndpoint(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	for i := 0; i < 5; i++ {
+		seedEvent(t, db, "page event", model.LevelInfo)
+	}
+	h := srv.Handler()
+
+	page := func(after string) store.SearchResult {
+		u := "/api/v1/search?q=page&limit=2"
+		if after != "" {
+			u += "&after=" + after
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, u, nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s)", rr.Code, rr.Body.String())
+		}
+		var res store.SearchResult
+		if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return res
+	}
+
+	seen := map[string]bool{}
+	cursor, pages := "", 0
+	for {
+		res := page(cursor)
+		for _, e := range res.Events {
+			if seen[e.ID] {
+				t.Fatalf("duplicate %s across pages", e.ID)
+			}
+			seen[e.ID] = true
+		}
+		pages++
+		if res.NextCursor == "" || len(res.Events) == 0 || pages > 10 {
+			break
+		}
+		cursor = res.NextCursor
+	}
+	if len(seen) != 5 {
+		t.Fatalf("paged %d unique events, want 5", len(seen))
+	}
+}
+
+func TestExportEndpoint(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	for i := 0; i < 7; i++ {
+		seedEvent(t, db, "export me", model.LevelError)
+	}
+	h := srv.Handler()
+
+	// NDJSON: one JSON object per line, all 7 (beyond a small limit param).
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/export?q=export&format=ndjson&limit=2", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ndjson status = %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("ndjson content-type = %q", ct)
+	}
+	lines := strings.Split(strings.TrimSpace(rr.Body.String()), "\n")
+	if len(lines) != 7 {
+		t.Fatalf("ndjson lines = %d, want 7 (export ignores the search cap)", len(lines))
+	}
+	var first model.LogEvent
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("ndjson line not valid JSON: %v", err)
+	}
+
+	// CSV: header + 7 rows.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/export?q=export&format=csv", nil))
+	if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != "text/csv" {
+		t.Fatalf("csv status/type = %d %q", rr.Code, rr.Header().Get("Content-Type"))
+	}
+	csvLines := strings.Split(strings.TrimSpace(rr.Body.String()), "\n")
+	if len(csvLines) != 8 || !strings.HasPrefix(csvLines[0], "timestamp,level,service") {
+		t.Fatalf("csv = %d lines, header=%q", len(csvLines), csvLines[0])
+	}
+}
+
 func TestStatsEndpoint(t *testing.T) {
 	srv, db := newServer(t, config.Default())
 	seedEvent(t, db, "a", model.LevelError)

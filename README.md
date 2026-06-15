@@ -59,13 +59,25 @@ omnilog forward --server http://HOST:8080 --api-key devkey --service api --file 
 The search box and the `q` parameter accept a small Splunk-like expression:
 
 - **Free text** — `timeout payments` (AND-combined, full-text via FTS5)
-- **Field filters** — `level=error service=checkout-api source=node-1`
+- **Field filters** — `level=error service=checkout-api source=node-1 message=…` (also `raw`)
 - **Attribute filters** — `attr.user_id=42` (or bare `user_id=42`)
 - **Negation** — `level!=debug`
+- **Comparison** — `attr.status>=500`, `attr.latency_ms<10` (numeric when both sides are numbers, else lexical)
+- **Wildcard** — `service=checkout*` (`*` glob)
+- **Exists** — `attr.request_id=*` (field present / attribute non-null)
+- **In set** — `level=(error,warn,fatal)`
+- **Regex** — `message=~timeout|refused` (RE2)
 - **Quoted phrases** — `"connection refused"`
 - **Time range** — `last=15m` (`s/m/h/d`) or absolute `from`/`to` (RFC3339 / unix)
 
-Example: `level=error service=checkout-api timeout last=1h`
+Filters are AND-combined. (Cross-field OR-grouping with parentheses is planned with
+the query-language spec; `IN` covers the common same-field OR case today.)
+
+Example: `level=(error,fatal) service=checkout* attr.status>=500 timeout last=1h`
+
+**Pagination & export.** `/api/v1/search` returns a `next_cursor`; pass it as
+`?after=<cursor>` for stable keyset paging (the UI's *Load more*). `/api/v1/export`
+streams **all** matches (beyond the search cap) as `?format=ndjson|csv|json`.
 
 ## Architecture
 

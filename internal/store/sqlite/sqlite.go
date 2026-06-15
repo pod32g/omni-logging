@@ -6,15 +6,73 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pod32g/omni-logging/internal/model"
 
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
+
+// Register a REGEXP function so the query language's `=~` operator can run as
+// `col REGEXP ?` in SQL. SQLite invokes regexp(pattern, subject) for the
+// expression `subject REGEXP pattern`. Patterns are compiled once and cached.
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction("regexp", 2, regexpFunc)
+}
+
+var (
+	regexCacheMu sync.RWMutex
+	regexCache   = map[string]*regexp.Regexp{}
+)
+
+func regexpFunc(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+	pattern, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("regexp: pattern must be text")
+	}
+	var subject string
+	switch v := args[1].(type) {
+	case string:
+		subject = v
+	case []byte:
+		subject = string(v)
+	case nil:
+		return int64(0), nil
+	default:
+		subject = fmt.Sprintf("%v", v)
+	}
+	re, err := cachedRegexp(pattern)
+	if err != nil {
+		return nil, err
+	}
+	if re.MatchString(subject) {
+		return int64(1), nil
+	}
+	return int64(0), nil
+}
+
+func cachedRegexp(pattern string) (*regexp.Regexp, error) {
+	regexCacheMu.RLock()
+	re, ok := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	if ok {
+		return re, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	regexCacheMu.Lock()
+	regexCache[pattern] = re
+	regexCacheMu.Unlock()
+	return re, nil
+}
 
 // DB is a SQLite-backed store.Store.
 type DB struct {

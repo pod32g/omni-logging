@@ -15,6 +15,7 @@ type Params struct {
 	Limit    string
 	Order    string
 	Interval string // histogram bucket (e.g. "1m"); Stats only
+	After    string // keyset pagination cursor (opaque, from a prior result)
 }
 
 // Build parses Params into a Query, resolving relative times against now.
@@ -68,6 +69,13 @@ func (p Params) Build(now time.Time) (Query, error) {
 			return Query{}, err
 		}
 		q.Interval = d
+	}
+	if p.After != "" {
+		ts, id, err := DecodeCursor(p.After)
+		if err != nil {
+			return Query{}, err
+		}
+		q.AfterTS, q.AfterID = ts, id
 	}
 
 	q.Normalize()

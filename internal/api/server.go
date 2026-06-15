@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("GET /api/v1/search", s.requireAdmin(s.handleSearch))
 	mux.HandleFunc("GET /api/v1/search/stats", s.requireAdmin(s.handleStats))
+	mux.HandleFunc("GET /api/v1/export", s.requireAdmin(s.handleExport))
 	mux.HandleFunc("GET /api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now)))
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/readyz", s.handleReady)
