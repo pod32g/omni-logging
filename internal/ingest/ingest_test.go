@@ -84,6 +84,15 @@ func TestIngest_WALCrashRecovery(t *testing.T) {
 	if got := total(t, db); got != 5 {
 		t.Fatalf("after second recovery store has %d, want 5 (not duplicated)", got)
 	}
+	// Free-text search must not see FTS duplicates from the double replay.
+	q, _ := query.Parse("event-0")
+	res, err := db.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.Total != 1 {
+		t.Fatalf("free-text after double recovery = %d, want 1 (no FTS duplicate)", res.Total)
+	}
 }
 
 // TestIngest_WALBackpressureNotWALd verifies events rejected for backpressure are

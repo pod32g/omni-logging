@@ -73,6 +73,18 @@ func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
 		if res[0].Message != "second version" {
 			t.Fatalf("re-append message = %q, want %q", res[0].Message, "second version")
 		}
+		// The full-text index must be idempotent too: re-applying an event (as
+		// crash recovery does) must not leave a duplicate FTS row that doubles
+		// free-text results, nor leave the superseded text searchable.
+		if got := searchIDs(t, s, "version"); len(got) != 1 {
+			t.Fatalf("free-text after re-append = %v, want exactly 1 (no FTS duplicate)", got)
+		}
+		if got := searchIDs(t, s, "second"); len(got) != 1 {
+			t.Fatalf("free-text for new text = %v, want 1", got)
+		}
+		if got := searchIDs(t, s, "first"); len(got) != 0 {
+			t.Fatalf("free-text for superseded text = %v, want 0", got)
+		}
 	})
 
 	t.Run("FreeTextSearch", func(t *testing.T) {

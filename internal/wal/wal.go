@@ -148,6 +148,10 @@ func (w *WAL) Append(payload []byte) (uint64, error) {
 		}
 	}
 	if _, err := w.active.Write(rec); err != nil {
+		// Drop any partially written bytes so a torn record can't shadow the next
+		// good one. The segment is in O_APPEND mode, so after truncation the next
+		// write resumes cleanly at activeSize.
+		_ = w.active.Truncate(w.activeSize)
 		return 0, fmt.Errorf("wal: write record: %w", err)
 	}
 	w.activeSize += int64(len(rec))

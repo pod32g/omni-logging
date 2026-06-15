@@ -68,15 +68,31 @@ func (d *DB) Append(ctx context.Context, events []model.LogEvent) error {
 	}
 	defer tx.Rollback()
 
+	// UPSERT (rather than INSERT OR REPLACE) so a re-appended event updates the
+	// existing row IN PLACE, preserving its rowid. We key the FTS row by that
+	// same rowid and delete-then-insert it, so re-applying an event (as crash
+	// recovery does) is fully idempotent — no duplicate FTS rows. RETURNING gives
+	// us the stable rowid for both the insert and the update case.
 	insLog, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO logs (id, ts, received_at, source, service, level, message, attributes, raw)
-		 VALUES (?,?,?,?,?,?,?,?,?)`)
+		`INSERT INTO logs (id, ts, received_at, source, service, level, message, attributes, raw)
+		 VALUES (?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   ts=excluded.ts, received_at=excluded.received_at, source=excluded.source,
+		   service=excluded.service, level=excluded.level, message=excluded.message,
+		   attributes=excluded.attributes, raw=excluded.raw
+		 RETURNING rowid`)
 	if err != nil {
 		return err
 	}
 	defer insLog.Close()
 
-	insFTS, err := tx.PrepareContext(ctx, `INSERT INTO logs_fts (id, text) VALUES (?, ?)`)
+	delFTS, err := tx.PrepareContext(ctx, `DELETE FROM logs_fts WHERE rowid = ?`)
+	if err != nil {
+		return err
+	}
+	defer delFTS.Close()
+
+	insFTS, err := tx.PrepareContext(ctx, `INSERT INTO logs_fts (rowid, id, text) VALUES (?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -91,13 +107,18 @@ func (d *DB) Append(ctx context.Context, events []model.LogEvent) error {
 			}
 			attrsJSON = string(b)
 		}
-		if _, err := insLog.ExecContext(ctx,
+		var rowid int64
+		if err := insLog.QueryRowContext(ctx,
 			e.ID, e.Timestamp.UnixNano(), e.ReceivedAt.UnixNano(),
 			e.Source, e.Service, string(e.Level), e.Message, attrsJSON, e.Raw,
-		); err != nil {
-			return fmt.Errorf("insert log %s: %w", e.ID, err)
+		).Scan(&rowid); err != nil {
+			return fmt.Errorf("upsert log %s: %w", e.ID, err)
 		}
-		if _, err := insFTS.ExecContext(ctx, e.ID, ftsText(e)); err != nil {
+		// Clear any prior FTS row for this event (no-op for a brand-new rowid).
+		if _, err := delFTS.ExecContext(ctx, rowid); err != nil {
+			return fmt.Errorf("clear fts %s: %w", e.ID, err)
+		}
+		if _, err := insFTS.ExecContext(ctx, rowid, e.ID, ftsText(e)); err != nil {
 			return fmt.Errorf("insert fts %s: %w", e.ID, err)
 		}
 	}
