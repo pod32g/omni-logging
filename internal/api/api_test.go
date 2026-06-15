@@ -140,6 +140,55 @@ func TestIngestAuth(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpoint(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	seedEvent(t, db, "hello", model.LevelInfo)
+	h := srv.Handler()
+
+	// Drive a search so the store-query histogram and HTTP counters record.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/search?q=hello", nil))
+
+	mrr := httptest.NewRecorder()
+	h.ServeHTTP(mrr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if mrr.Code != http.StatusOK {
+		t.Fatalf("/metrics status = %d", mrr.Code)
+	}
+	if ct := mrr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("/metrics content-type = %q, want text/plain", ct)
+	}
+	body := mrr.Body.String()
+	for _, want := range []string{
+		"omnilog_http_requests_total",
+		"omnilog_store_query_duration_seconds",
+		"omnilog_ingest_received_total",
+		"omnilog_tail_subscribers",
+		"omnilog_build_info",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	srv, db := newServer(t, config.Default())
+	h := srv.Handler()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("readyz healthy status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+
+	db.Close() // simulate backend loss
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz after store close status = %d, want 503", rr.Code)
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	srv, _ := newServer(t, config.Default())
 	rr := httptest.NewRecorder()

@@ -4,9 +4,23 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// metricsMiddleware records per-request count and duration, labeled by method
+// and response status code only (no path label, to bound cardinality).
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		code := strconv.Itoa(rec.status)
+		s.httpReqs.With(r.Method, code).Inc()
+		s.httpDur.With(r.Method, code).Observe(time.Since(start).Seconds())
+	})
+}
 
 // recoverMiddleware turns panics into 500s and logs them instead of crashing
 // the server.

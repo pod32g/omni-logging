@@ -54,6 +54,23 @@ func TestHub_DropsWhenFull(t *testing.T) {
 	}
 }
 
+func TestHub_DroppedTotalAggregates(t *testing.T) {
+	hub := NewHub()
+	q, _ := query.Parse("")
+	sub := hub.Subscribe(q, 2)
+	defer sub.Close()
+
+	for i := 0; i < 10; i++ {
+		hub.Publish(ev(model.LevelInfo, "x"))
+	}
+	if hub.DroppedTotal() == 0 {
+		t.Fatal("expected hub DroppedTotal > 0 when a subscriber buffer fills")
+	}
+	if hub.DroppedTotal() != sub.Dropped() {
+		t.Fatalf("hub DroppedTotal = %d, want = sub.Dropped() = %d", hub.DroppedTotal(), sub.Dropped())
+	}
+}
+
 func TestHub_UnsubscribeStopsDelivery(t *testing.T) {
 	hub := NewHub()
 	q, _ := query.Parse("")
