@@ -207,10 +207,13 @@ func ftsMatchExpr(terms []string) string {
 	return strings.Join(parts, " AND ")
 }
 
-// fromClause returns the table expression, joining FTS only when needed.
+// fromClause returns the table expression, joining FTS only when needed. The
+// join is on the integer rowid (logs_fts.rowid == logs.rowid, guaranteed by
+// Append and the v2 migration) rather than the TEXT id — an integer rowid lookup
+// is markedly faster than the TEXT primary-key lookup the v1 join used.
 func fromClause(needFTS bool) string {
 	if needFTS {
-		return "FROM logs JOIN logs_fts ON logs_fts.id = logs.id"
+		return "FROM logs JOIN logs_fts ON logs_fts.rowid = logs.rowid"
 	}
 	return "FROM logs"
 }
@@ -240,8 +243,15 @@ func countSQL(q query.Query) (string, []any) {
 	return fmt.Sprintf("SELECT COUNT(*) %s %s", fromClause(w.needFTS), w.sqlStr()), w.args
 }
 
+// readTimeout bounds the worst case of an interactive read so a single broad
+// query (a huge COUNT or a wide FTS scan) cannot stall the server indefinitely.
+// Exports (Stream) are deliberately exempt — they are expected to run long.
+const readTimeout = 30 * time.Second
+
 // Search executes a query and returns matching events plus the total count.
 func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
 	q.Normalize()
 	start := time.Now()
 
@@ -353,6 +363,8 @@ func scanEvent(rows *sql.Rows) (model.LogEvent, error) {
 
 // Stats computes the histogram and level/service facets for a query.
 func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
 	q.Normalize()
 	start := time.Now()
 

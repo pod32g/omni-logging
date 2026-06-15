@@ -3,17 +3,21 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+
+	"github.com/pod32g/omni-logging/internal/model"
 )
 
 // migration is a single ordered, versioned schema change. stmts are executed in
-// order within one transaction; applying it advances PRAGMA user_version to
-// version. Migrations must be append-only: never edit or reorder a released
-// migration — add a new one.
+// order within one transaction, then fn (if set) runs in the same transaction;
+// applying it advances PRAGMA user_version to version. Migrations must be
+// append-only: never edit or reorder a released migration — add a new one.
 type migration struct {
 	version int
 	name    string
 	stmts   []string
+	fn      func(ctx context.Context, tx *sql.Tx) error // optional data migration
 }
 
 // migrations is the ordered list of schema changes. Migration 1 is the verbatim
@@ -44,6 +48,66 @@ var migrations = []migration{
 			`CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(id UNINDEXED, text)`,
 		},
 	},
+	{
+		version: 2,
+		name:    "rebuild fts with aligned rowids",
+		// M20: the search join switches from the slow TEXT-id join to an integer
+		// rowid join. That requires every logs_fts row's rowid to equal its
+		// logs.rowid. Events written since M3 already satisfy this; this rebuilds
+		// the index so any pre-M3 rows do too. Idempotent (rebuilt from logs).
+		fn: rebuildFTSRowids,
+	},
+}
+
+// rebuildFTSRowids re-creates every full-text row keyed by its logs.rowid,
+// recomputing the searchable text exactly as Append does.
+func rebuildFTSRowids(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM logs_fts`); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT rowid, id, source, service, level, message, attributes, raw FROM logs`)
+	if err != nil {
+		return err
+	}
+	type rec struct {
+		rowid int64
+		e     model.LogEvent
+	}
+	var recs []rec
+	for rows.Next() {
+		var (
+			r         rec
+			level     string
+			attrsJSON string
+		)
+		if err := rows.Scan(&r.rowid, &r.e.ID, &r.e.Source, &r.e.Service, &level, &r.e.Message, &attrsJSON, &r.e.Raw); err != nil {
+			rows.Close()
+			return err
+		}
+		r.e.Level = model.Level(level)
+		if attrsJSON != "" && attrsJSON != "{}" {
+			_ = json.Unmarshal([]byte(attrsJSON), &r.e.Attributes)
+		}
+		recs = append(recs, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close() // close the cursor before inserting on the same connection
+
+	ins, err := tx.PrepareContext(ctx, `INSERT INTO logs_fts (rowid, id, text) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer ins.Close()
+	for _, r := range recs {
+		if _, err := ins.ExecContext(ctx, r.rowid, r.e.ID, ftsText(r.e)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // latestSchemaVersion is the highest version this binary knows how to produce.
@@ -92,6 +156,11 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 
 	for _, s := range m.stmts {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	if m.fn != nil {
+		if err := m.fn(ctx, tx); err != nil {
 			return err
 		}
 	}
