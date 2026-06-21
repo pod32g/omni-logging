@@ -23,13 +23,6 @@ services:
       OMNILOG_ADMIN_TOKEN: ${OMNILOG_ADMIN_TOKEN:-}
       OMNILOG_INGEST_KEYS: ${OMNILOG_INGEST_KEYS:-}
       OMNILOG_METRICS_PUBLIC: ${OMNILOG_METRICS_PUBLIC:-false}
-      # Optional self-monitoring: ship our own WARN+ logs to an omnilog server
-      # (LOGSHIP_URL, usually this very process at http://127.0.0.1:8080). The
-      # WARN minimum prevents an ingest→log→ship feedback loop. Off by default.
-      LOGSHIP_ENABLED: ${LOGSHIP_ENABLED:-false}
-      LOGSHIP_URL: ${LOGSHIP_URL:-}
-      LOGSHIP_API_KEY: ${LOGSHIP_API_KEY:-}
-      LOGSHIP_SERVICE: ${LOGSHIP_SERVICE:-omnilog}
     volumes:
       - omnilog-data:/data
     tmpfs:
