@@ -27,6 +27,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/forward"
 	"github.com/pod32g/omni-logging/internal/ingest"
+	"github.com/pod32g/omni-logging/internal/logship"
 	"github.com/pod32g/omni-logging/internal/model"
 	"github.com/pod32g/omni-logging/internal/queryclient"
 	"github.com/pod32g/omni-logging/internal/settings"
@@ -48,8 +49,36 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	textHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	var handler slog.Handler = textHandler
+	// Optionally ship our own WARN+ logs to an omnilog server (usually this very
+	// process). The WARN minimum is a deliberate loop guard: routine per-request
+	// Info logs — including the ingest requests the shipper itself makes — are
+	// never shipped, so we can't feed our own logs back into ourselves forever.
+	var shipCloser *logship.Handler
+	if os.Args[1] == "serve" && (os.Getenv("LOGSHIP_ENABLED") == "true" || os.Getenv("LOGSHIP_ENABLED") == "1") {
+		sh, herr := logship.NewHandler(logship.Config{
+			URL:      os.Getenv("LOGSHIP_URL"),
+			APIKey:   os.Getenv("LOGSHIP_API_KEY"),
+			Service:  logshipService(),
+			MinLevel: slog.LevelWarn,
+		})
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "logship: disabled (%v)\n", herr)
+		} else {
+			handler = logship.Fanout(textHandler, sh)
+			shipCloser = sh
+		}
+	}
+	logger := slog.New(handler)
 	slog.SetDefault(logger)
+	if shipCloser != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = shipCloser.Close(ctx)
+		}()
+	}
 
 	var err error
 	switch os.Args[1] {
@@ -78,6 +107,14 @@ func main() {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// logshipService returns the configured service name for shipped logs.
+func logshipService() string {
+	if v := os.Getenv("LOGSHIP_SERVICE"); v != "" {
+		return v
+	}
+	return "omnilog"
 }
 
 func usage() {
