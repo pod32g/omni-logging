@@ -16,8 +16,10 @@ services:
       - no-new-privileges:true
     pids_limit: 256
     command: ["serve", "--addr", ":8080", "--db", "/data/omni.db", "--retention-days", "14"]
-    ports:
-      - "${OMNILOG_HOST_PORT:-8080}:8080"
+    # Fronted by the netviz-sidecar (below): expose internally instead of
+    # publishing. The sidecar takes over the host port.
+    expose:
+      - "8080"
     environment:
       # Optional secrets; set in a .env file next to this compose file.
       OMNILOG_ADMIN_TOKEN: ${OMNILOG_ADMIN_TOKEN:-}
@@ -34,6 +36,38 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # --- Omni-NetViz observability sidecar ---
+  # Fronts omnilog's published port and reverse-proxies to the app on the internal
+  # network, reporting inbound traffic metadata to Omni-NetViz. Metadata only —
+  # never bodies or credentials; talks only to Omni-NetViz. Requires the
+  # netviz-sidecar:local image on the deploy host (built from
+  # github.com/pod32g/omni-netviz Dockerfile.sidecar).
+  netviz-sidecar:
+    image: netviz-sidecar:local
+    container_name: omnilog-netviz
+    restart: unless-stopped
+    depends_on:
+      - omnilog
+    command:
+      - "-service=omnilog"
+      - "-host=chizu"
+      - "-namespace=omnilog"
+      - "-environment=prod"
+      - "-docker-network=omnilog_default"
+      - "-listen=:8080"
+      - "-upstream=http://omnilog:8080"
+      - "-flush-interval=10s"
+    environment:
+      NETVIZ_URL: "${NETVIZ_URL:-http://192.168.68.34:8099}"
+      NETVIZ_TOKEN: "${NETVIZ_INGEST_TOKEN:-}"
+    ports:
+      - "${OMNILOG_HOST_PORT:-8080}:8080"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   omnilog-data:
