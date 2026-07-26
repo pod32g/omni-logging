@@ -32,6 +32,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/queryclient"
 	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
+	"github.com/pod32g/omni-logging/internal/syslog"
 	"github.com/pod32g/omni-logging/internal/tail"
 	"github.com/pod32g/omni-logging/internal/wal"
 	"github.com/pod32g/omni-logging/internal/web"
@@ -112,6 +113,8 @@ func runServe(args []string, logger *slog.Logger) error {
 		tlsCert    = fs.String("tls-cert", "", "TLS certificate file (enables HTTPS with -tls-key)")
 		tlsKey     = fs.String("tls-key", "", "TLS key file")
 		hsts       = fs.Bool("hsts", false, "send Strict-Transport-Security when TLS is on (opt-in; browsers cache it for a year)")
+		syslogUDP  = fs.String("syslog-udp", "", "listen for syslog over UDP, e.g. :514 (empty = off; unauthenticated, trusted networks only)")
+		syslogTCP  = fs.String("syslog-tcp", "", "listen for syslog over TCP, e.g. :514 (empty = off; unauthenticated, trusted networks only)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -153,6 +156,12 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	if set["hsts"] {
 		cfg.HSTS = *hsts
+	}
+	if set["syslog-udp"] {
+		cfg.SyslogUDPAddr = *syslogUDP
+	}
+	if set["syslog-tcp"] {
+		cfg.SyslogTCPAddr = *syslogTCP
 	}
 
 	store, err := sqlite.Open(cfg.DBPath)
@@ -232,6 +241,28 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	ing.Start()
 	defer ing.Stop()
+
+	// Syslog messages go through the same Ingestor as HTTP ingest, so they get
+	// the WAL, batching, retention and live tail for free. Started after the
+	// writer and stopped before it drains, so nothing is accepted after the
+	// queue closes.
+	if cfg.SyslogEnabled() {
+		sysSrv, serr := syslog.New(syslog.Options{
+			UDPAddr: cfg.SyslogUDPAddr,
+			TCPAddr: cfg.SyslogTCPAddr,
+			Sink:    ing.Enqueue,
+			Logger:  logger,
+		})
+		if serr != nil {
+			return fmt.Errorf("syslog: %w", serr)
+		}
+		if serr := sysSrv.Start(); serr != nil {
+			return fmt.Errorf("start syslog: %w", serr)
+		}
+		defer sysSrv.Stop()
+		logger.Warn("syslog collector enabled; the protocol is unauthenticated, bind it to a trusted network only",
+			"udp", cfg.SyslogUDPAddr, "tcp", cfg.SyslogTCPAddr)
+	}
 
 	// Closed at the start of shutdown so live-tail streams end promptly instead
 	// of keeping graceful shutdown busy until its deadline.

@@ -32,6 +32,12 @@ type Config struct {
 	// it pins the origin to HTTPS and would lock out a plain-HTTP fallback.
 	HSTS bool `yaml:"hsts"`
 
+	// Syslog collector. Empty = that listener is disabled. The protocol carries
+	// no credentials, so exposure is controlled purely by the bind address —
+	// keep these on a trusted network (see README).
+	SyslogUDPAddr string `yaml:"syslog_udp_addr"`
+	SyslogTCPAddr string `yaml:"syslog_tcp_addr"`
+
 	// Admission control (per ingest key). Zero = disabled.
 	RateLimitPerSec  float64 `yaml:"rate_limit_per_sec"` // request token refill/sec per key
 	RateBurst        int     `yaml:"rate_burst"`         // token-bucket capacity
@@ -106,6 +112,12 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("OMNILOG_TLS_KEY"); v != "" {
 		c.TLSKey = v
 	}
+	if v := os.Getenv("OMNILOG_SYSLOG_UDP_ADDR"); v != "" {
+		c.SyslogUDPAddr = v
+	}
+	if v := os.Getenv("OMNILOG_SYSLOG_TCP_ADDR"); v != "" {
+		c.SyslogTCPAddr = v
+	}
 	if v := os.Getenv("OMNILOG_HSTS"); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			c.HSTS = enabled
@@ -145,6 +157,9 @@ func splitCSV(s string) []string {
 	}
 	return out
 }
+
+// SyslogEnabled reports whether either syslog listener is configured.
+func (c Config) SyslogEnabled() bool { return c.SyslogUDPAddr != "" || c.SyslogTCPAddr != "" }
 
 // TLSEnabled reports whether both a cert and key are configured.
 func (c Config) TLSEnabled() bool { return c.TLSCert != "" && c.TLSKey != "" }

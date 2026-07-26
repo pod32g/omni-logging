@@ -8,6 +8,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 ## Features (v1)
 
 - **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs.
+- **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — counts-over-time histogram and field facets.
@@ -100,6 +101,7 @@ Single Go binary, packages under `internal/`:
 | `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
 | `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
 | `forward` | File-tailing forwarder client |
+| `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
 
 The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
 project builds with a single `go build` — no Node toolchain required. See the
@@ -167,6 +169,41 @@ omnilog healthcheck --url http://localhost:8080/api/v1/healthz  # container HEAL
 Run locally with Compose: `docker compose up --build -d` (UI on `:8080`,
 data in the `omnilog-data` volume). Set `OMNILOG_ADMIN_TOKEN` / `OMNILOG_INGEST_KEYS`
 in a `.env` file to enable auth.
+
+### Syslog collector
+
+Off unless you bind it. Enable with `--syslog-udp` / `--syslog-tcp` (or
+`OMNILOG_SYSLOG_UDP_ADDR` / `OMNILOG_SYSLOG_TCP_ADDR`):
+
+```sh
+omnilog serve --syslog-udp :5514 --syslog-tcp :5514
+```
+
+Point Docker services at it with no application changes:
+
+```yaml
+services:
+  my-service:
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "udp://omnilog:5514"
+        tag: "my-service"
+```
+
+Both RFC5424 and the classic RFC3164 format are parsed, over both RFC6587 TCP
+framings (octet-counted and newline-delimited). The syslog severity becomes the
+event level, the app-name/tag becomes `service`, the hostname becomes `source`,
+and RFC5424 structured data is flattened into searchable attributes
+(`sdid.param`), alongside `syslog_facility` and `syslog_severity`. A message
+that fails to parse is still stored with its raw text rather than dropped.
+
+> **Syslog carries no credentials.** There is nothing to authenticate, so
+> exposure is controlled entirely by the bind address — the ingest keys do not
+> apply to this listener. Bind it to a private interface or a container network,
+> never to a public one. Ports below 1024 (like the conventional 514) need
+> privileges the distroless container deliberately does not have; use a high
+> port and remap it if you need 514 externally.
 
 ### Optional hardening
 
