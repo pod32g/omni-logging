@@ -18,6 +18,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server, with an optional durable spool for at-least-once delivery across restarts and outages.
+- **Client SDKs** — dependency-free Go, Python and JavaScript clients with native `slog` / `logging` / pino integrations, so an app can emit directly without the forwarder ([`sdk/`](sdk/)).
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
 - **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a self-hosted reference UI at `/docs` (no CDN; works air-gapped).
 - **Settings page** — edit retention, rate limits, quotas, log level, and ingest keys live (persisted in the DB, applied without a restart) via the UI or `GET`/`PUT /api/v1/config`. `PUT` merges: fields you omit keep their current value, so clearing one takes an explicit zero (e.g. `"ingest_keys": []`). The admin token is browser-side only and not editable from the UI.
@@ -236,6 +237,33 @@ omnilog forward --server http://HOST:8080 --api-key devkey \
 The spool reuses `internal/wal` rather than introducing a second append-only
 log: CRC-checked records, torn-tail recovery, segment rotation and a checkpoint
 are exactly what "keep this until it is acknowledged" needs.
+
+## Client SDKs
+
+Apps can emit directly, without the file forwarder in between. See
+[`sdk/`](sdk/) for all three.
+
+```go
+client, _ := omnilog.New(omnilog.Options{ServerURL: "http://logs:8080", Service: "api"})
+defer client.Close()
+slog.SetDefault(slog.New(omnilog.NewHandler(client, nil)))
+slog.Error("payment failed", "status", 402)   // -> attr.status>=400
+```
+
+```python
+logging.getLogger().addHandler(
+    omnilog.OmnilogHandler(server_url="http://logs:8080", service="api"))
+```
+
+```js
+const log = new Omnilog({ serverUrl: 'http://logs:8080', service: 'api' });
+log.error('payment failed', { status: 402 });
+```
+
+All three batch on a background worker so a logging call never blocks on the
+network, drop-and-count rather than block when the queue fills, expose
+`sent`/`failed`/`dropped` counters, and optionally gzip. None of them has a
+dependency outside its language's standard library.
 
 ## Compression
 
