@@ -392,6 +392,7 @@ func runForward(args []string, logger *slog.Logger) error {
 		source    = fs.String("source", "", "source/host (default: hostname)")
 		fromStart = fs.Bool("from-start", false, "forward existing file contents before following")
 		batch     = fs.Int("batch", 200, "max lines per request")
+		spoolDir  = fs.String("spool-dir", "", "durable spool directory: batches survive restarts and are retried until accepted (empty = best-effort, batches can be lost)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -405,6 +406,7 @@ func runForward(args []string, logger *slog.Logger) error {
 		Files:     files,
 		FromStart: *fromStart,
 		Batch:     *batch,
+		SpoolDir:  *spoolDir,
 		Logger:    logger,
 	})
 	if err != nil {
@@ -414,7 +416,13 @@ func runForward(args []string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("omnilog forwarding", "server", *server, "files", []string(files), "service", *service)
+	defer fwd.Close()
+
+	logger.Info("omnilog forwarding", "server", *server, "files", []string(files),
+		"service", *service, "durable", *spoolDir != "")
+	if *spoolDir == "" {
+		logger.Warn("forward: no --spool-dir set; a batch that cannot be delivered will be lost")
+	}
 	return fwd.Run(ctx)
 }
 

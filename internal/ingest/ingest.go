@@ -74,6 +74,8 @@ type Ingestor struct {
 	wal     *wal.WAL
 	limiter *admission.Limiter
 
+	dedupe *batchDeduper
+
 	ch chan queued
 	wg sync.WaitGroup
 
@@ -86,10 +88,11 @@ type Ingestor struct {
 	// rather than being skipped by a checkpoint that jumped over a gap.
 	checkpointStalled bool
 
-	received atomic.Int64
-	written  atomic.Int64
-	dropped  atomic.Int64
-	rejected atomic.Int64 // requests refused by admission control (rate/quota)
+	received   atomic.Int64
+	written    atomic.Int64
+	dropped    atomic.Int64
+	rejected   atomic.Int64 // requests refused by admission control (rate/quota)
+	duplicates atomic.Int64 // retried batches recognised by their batch ID
 }
 
 // New creates an Ingestor. hub may be nil to disable live-tail broadcasting.
@@ -105,6 +108,7 @@ func New(s store.Store, hub *tail.Hub, opts Options) *Ingestor {
 		opts:    opts,
 		wal:     opts.WAL,
 		limiter: lim,
+		dedupe:  newBatchDeduper(opts.Now),
 		ch:      make(chan queued, opts.BufferSize),
 	}
 }
@@ -322,21 +326,23 @@ func (i *Ingestor) writeBatch(batch []model.LogEvent, maxSeq uint64) {
 
 // Metrics is a snapshot of ingest counters.
 type Metrics struct {
-	Received int64 `json:"received"`
-	Written  int64 `json:"written"`
-	Dropped  int64 `json:"dropped"`
-	Rejected int64 `json:"rejected"`
-	Queued   int64 `json:"queued"`
+	Received   int64 `json:"received"`
+	Written    int64 `json:"written"`
+	Dropped    int64 `json:"dropped"`
+	Rejected   int64 `json:"rejected"`
+	Queued     int64 `json:"queued"`
+	Duplicates int64 `json:"duplicates"`
 }
 
 // Metrics returns a snapshot of ingest activity.
 func (i *Ingestor) Metrics() Metrics {
 	return Metrics{
-		Received: i.received.Load(),
-		Written:  i.written.Load(),
-		Dropped:  i.dropped.Load(),
-		Rejected: i.rejected.Load(),
-		Queued:   int64(len(i.ch)),
+		Received:   i.received.Load(),
+		Written:    i.written.Load(),
+		Dropped:    i.dropped.Load(),
+		Rejected:   i.rejected.Load(),
+		Queued:     int64(len(i.ch)),
+		Duplicates: i.duplicates.Load(),
 	}
 }
 

@@ -35,9 +35,23 @@ type recordError struct {
 
 // ingestResponse is the JSON body returned from ingest endpoints.
 type ingestResponse struct {
-	Accepted int           `json:"accepted"`
-	Rejected int           `json:"rejected"`
-	Errors   []recordError `json:"errors,omitempty"`
+	Accepted  int           `json:"accepted"`
+	Rejected  int           `json:"rejected"`
+	Duplicate bool          `json:"duplicate,omitempty"` // a retry of an already-accepted batch
+	Errors    []recordError `json:"errors,omitempty"`
+}
+
+// duplicateBatch reports whether this request repeats a batch already accepted,
+// answering 200 so the client stops retrying. A retry means the acknowledgement
+// was lost, not the data, so re-ingesting would duplicate every event in it.
+func (i *Ingestor) duplicateBatch(w http.ResponseWriter, r *http.Request) bool {
+	id := r.Header.Get("X-Batch-Id")
+	if id == "" || !i.dedupe.Seen(id) {
+		return false
+	}
+	i.duplicates.Add(1)
+	writeJSON(w, http.StatusOK, ingestResponse{Duplicate: true})
+	return true
 }
 
 // countingReader tallies the bytes actually read. Quota accounting uses this
@@ -66,6 +80,9 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := i.admit(w, r)
 		if !ok {
+			return
+		}
+		if i.duplicateBatch(w, r) {
 			return
 		}
 		counter := &countingReader{r: http.MaxBytesReader(w, r.Body, i.opts.MaxBodyBytes)}
@@ -187,6 +204,9 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := i.admit(w, r)
 		if !ok {
+			return
+		}
+		if i.duplicateBatch(w, r) {
 			return
 		}
 		service := firstNonEmpty(r.URL.Query().Get("service"), r.Header.Get("X-Service"))

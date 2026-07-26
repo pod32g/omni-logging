@@ -15,7 +15,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Alerting** — scheduled rules over any search or aggregation, with threshold conditions and webhook/Slack notifications on state transitions.
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
-- **Forwarder** — `omnilog forward` tails files and ships them to the server.
+- **Forwarder** — `omnilog forward` tails files and ships them to the server, with an optional durable spool for at-least-once delivery across restarts and outages.
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
 - **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a self-hosted reference UI at `/docs` (no CDN; works air-gapped).
 - **Settings page** — edit retention, rate limits, quotas, log level, and ingest keys live (persisted in the DB, applied without a restart) via the UI or `GET`/`PUT /api/v1/config`. `PUT` merges: fields you omit keep their current value, so clearing one takes an explicit zero (e.g. `"ingest_keys": []`). The admin token is browser-side only and not editable from the UI.
@@ -196,6 +196,42 @@ omnilog healthcheck --url http://localhost:8080/api/v1/healthz  # container HEAL
 Run locally with Compose: `docker compose up --build -d` (UI on `:8080`,
 data in the `omnilog-data` volume). Set `OMNILOG_ADMIN_TOKEN` / `OMNILOG_INGEST_KEYS`
 in a `.env` file to enable auth.
+
+## Durable forwarding
+
+By default the forwarder is best-effort: a batch it cannot deliver is retried a
+few times and then lost. Point it at a spool directory to make delivery
+at-least-once instead:
+
+```sh
+omnilog forward --server http://HOST:8080 --api-key devkey \
+  --service api --file /var/log/app.log --spool-dir /var/lib/omnilog-forward
+```
+
+- Every batch is written to a CRC-checked on-disk queue **before** it is sent,
+  and removed only once the server accepts it. A restart, a crash or a server
+  outage resumes where it left off.
+- Transient failures (network, `429`, `5xx`) retry indefinitely with capped
+  backoff, because the data is safe on disk — giving up would discard something
+  still queued. Without a spool the retry budget stays bounded, since the batch
+  exists only in memory.
+- A batch the server refuses **permanently** (a bad API key, a malformed
+  request) goes to `dead-letter.ndjson` in the spool directory with its lines
+  and the reason, so it can be inspected and replayed by hand rather than
+  disappearing into a log line.
+- Each batch carries an `X-Batch-Id`, reused across retries. The server
+  remembers recently-seen batch IDs and answers a repeat with
+  `{"duplicate": true}` instead of storing the events twice.
+
+> Delivery is **at-least-once**, not exactly-once. Event IDs are assigned by the
+> server so a producer cannot overwrite existing history, which means they
+> cannot double as a de-duplication key; the batch ID handles the common case
+> (a retry seconds later) and its window is in-memory and time-bounded. A
+> re-send hours later, or after a server restart, can still duplicate.
+
+The spool reuses `internal/wal` rather than introducing a second append-only
+log: CRC-checked records, torn-tail recovery, segment rotation and a checkpoint
+are exactly what "keep this until it is acknowledged" needs.
 
 ## Alerting
 

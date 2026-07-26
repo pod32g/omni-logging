@@ -115,13 +115,15 @@ func TestRetryPolicy(t *testing.T) {
 		}
 	}
 
-	if backoffFor(1) != baseBackoff {
-		t.Errorf("first backoff = %v, want %v", backoffFor(1), baseBackoff)
+	f := &Forwarder{}
+	f.opts.withDefaults()
+	if f.backoffFor(1) != baseBackoff {
+		t.Errorf("first backoff = %v, want %v", f.backoffFor(1), baseBackoff)
 	}
-	if backoffFor(2) != 2*baseBackoff {
-		t.Errorf("second backoff = %v, want %v", backoffFor(2), 2*baseBackoff)
+	if f.backoffFor(2) != 2*baseBackoff {
+		t.Errorf("second backoff = %v, want %v", f.backoffFor(2), 2*baseBackoff)
 	}
-	if got := backoffFor(50); got != maxBackoff {
+	if got := f.backoffFor(50); got != maxBackoff {
 		t.Errorf("backoff must saturate at %v, got %v", maxBackoff, got)
 	}
 }

@@ -30,6 +30,19 @@ type Options struct {
 	FromStart     bool // read existing content before following new lines
 	Client        *http.Client
 	Logger        *slog.Logger
+
+	// SpoolDir turns best-effort tailing into at-least-once delivery: each
+	// batch is written to a durable on-disk queue before it is sent, retried
+	// until the server accepts it, and only then dropped from the queue. A
+	// batch the server refuses permanently is written to a dead-letter file.
+	// Empty keeps the previous behaviour, where a batch that cannot be
+	// delivered is lost.
+	SpoolDir string
+
+	// RetryBackoff is the first retry delay; it doubles up to RetryMaxBackoff.
+	// Exposed mainly so tests do not have to wait out the production schedule.
+	RetryBackoff    time.Duration
+	RetryMaxBackoff time.Duration
 }
 
 func (o *Options) withDefaults() {
@@ -53,12 +66,19 @@ func (o *Options) withDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
+	if o.RetryBackoff <= 0 {
+		o.RetryBackoff = baseBackoff
+	}
+	if o.RetryMaxBackoff <= 0 {
+		o.RetryMaxBackoff = maxBackoff
+	}
 }
 
 // Forwarder tails files and forwards their lines.
 type Forwarder struct {
 	opts   Options
 	rawURL string
+	spool  *spool // nil when SpoolDir is unset
 }
 
 // New creates a Forwarder, returning an error if required options are missing.
@@ -84,11 +104,33 @@ func New(opts Options) (*Forwarder, error) {
 	base.Path = strings.TrimRight(base.Path, "/") + "/api/v1/ingest/raw"
 	base.RawQuery = q.Encode()
 
-	return &Forwarder{opts: opts, rawURL: base.String()}, nil
+	f := &Forwarder{opts: opts, rawURL: base.String()}
+	if opts.SpoolDir != "" {
+		sp, serr := openSpool(opts.SpoolDir)
+		if serr != nil {
+			return nil, serr
+		}
+		f.spool = sp
+	}
+	return f, nil
+}
+
+// Close releases the spool. Undelivered batches stay on disk for the next run.
+func (f *Forwarder) Close() error {
+	if f.spool == nil {
+		return nil
+	}
+	return f.spool.Close()
 }
 
 // Run tails all files and forwards lines until ctx is cancelled.
 func (f *Forwarder) Run(ctx context.Context) error {
+	// Anything left in the spool from a previous run goes first, so restart
+	// order matches ingest order.
+	if err := f.drainSpool(ctx); err != nil {
+		return err
+	}
+
 	lines := make(chan string, f.opts.Batch*4)
 	var wg sync.WaitGroup
 	for _, path := range f.opts.Files {
@@ -194,7 +236,7 @@ func (f *Forwarder) send(ctx context.Context, in <-chan string) {
 		if len(batch) == 0 {
 			return
 		}
-		f.post(c, batch)
+		f.deliver(c, batch)
 		batch = batch[:0]
 	}
 	// On shutdown the parent context is already cancelled, so posting with it
@@ -247,61 +289,180 @@ func retryable(status int) bool {
 }
 
 // backoffFor returns the delay before the given attempt, doubling up to a cap.
-func backoffFor(attempt int) time.Duration {
-	d := baseBackoff << (attempt - 1)
-	if d > maxBackoff || d <= 0 {
-		return maxBackoff
+func (f *Forwarder) backoffFor(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := f.opts.RetryBackoff << (attempt - 1)
+	if d > f.opts.RetryMaxBackoff || d <= 0 {
+		return f.opts.RetryMaxBackoff
 	}
 	return d
 }
 
-// post sends a batch of lines, retrying transient failures with exponential
-// backoff. A batch that still cannot be delivered is dropped with a loud error:
-// the forwarder holds no durable spool, so this is the one place logs can be
-// lost, and it should be visible when it happens.
-func (f *Forwarder) post(ctx context.Context, batch []string) {
-	body := strings.Join(batch, "\n")
+// deliveryOutcome is how a single POST attempt ended.
+type deliveryOutcome int
+
+const (
+	delivered deliveryOutcome = iota // the server accepted it
+	transient                        // worth retrying (network, 429, 5xx)
+	permanent                        // the server will never accept it
+	abandoned                        // shutting down; leave it queued
+)
+
+// attempt performs one POST. The batch ID goes in a header so a retry is
+// recognisable as the same batch rather than as new data.
+func (f *Forwarder) attempt(ctx context.Context, b spooledBatch) (deliveryOutcome, error) {
+	body := strings.Join(b.Lines, "\n")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.rawURL, bytes.NewReader([]byte(body)))
+	if err != nil {
+		return transient, err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	if b.ID != "" {
+		req.Header.Set("X-Batch-Id", b.ID)
+	}
+	if f.opts.APIKey != "" {
+		req.Header.Set("X-Api-Key", f.opts.APIKey)
+	}
+	resp, err := f.opts.Client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return abandoned, err
+		}
+		return transient, err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode/100 == 2:
+		return delivered, nil
+	case retryable(resp.StatusCode):
+		return transient, fmt.Errorf("server returned %d", resp.StatusCode)
+	default:
+		return permanent, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+}
+
+// deliver spools a batch (when durable delivery is enabled) and sends it,
+// acknowledging the spool entry only once the server has accepted it.
+func (f *Forwarder) deliver(ctx context.Context, lines []string) {
+	b := spooledBatch{ID: newBatchID(), Lines: append([]string(nil), lines...)}
+
+	var seq uint64
+	if f.spool != nil {
+		var err error
+		seq, err = f.spool.Add(b)
+		if err != nil {
+			// Durability is compromised, so say so plainly and still try to
+			// send: refusing to send as well would lose the batch for certain.
+			f.opts.Logger.Error("forward: could not spool batch durably; sending anyway",
+				"lines", len(b.Lines), "error", err)
+		}
+	}
+
+	outcome, err := f.post(ctx, b)
+	f.settle(b, seq, outcome, err)
+}
+
+// settle records the end state of a batch: acknowledged, dead-lettered, or left
+// in the spool for the next attempt.
+func (f *Forwarder) settle(b spooledBatch, seq uint64, outcome deliveryOutcome, err error) {
+	switch outcome {
+	case delivered:
+		if f.spool != nil && seq > 0 {
+			if aerr := f.spool.Ack(seq); aerr != nil {
+				// Failing to advance the checkpoint only means the batch is
+				// re-sent later; the server's batch-ID dedup absorbs that.
+				f.opts.Logger.Warn("forward: could not acknowledge spooled batch", "error", aerr)
+			}
+		}
+	case permanent:
+		f.opts.Logger.Error("forward: server refused the batch permanently",
+			"lines", len(b.Lines), "batch", b.ID, "error", err)
+		if f.spool != nil {
+			rec := deadLetterRecord{At: time.Now().UTC(), Batch: b.ID, Reason: err.Error(), Lines: b.Lines}
+			if derr := f.spool.DeadLetter(rec); derr != nil {
+				f.opts.Logger.Error("forward: could not write the dead-letter record", "error", derr)
+			} else {
+				f.opts.Logger.Warn("forward: batch written to the dead-letter file",
+					"path", f.spool.DeadLetterPath(), "lines", len(b.Lines))
+			}
+			if seq > 0 {
+				// It is recorded elsewhere now, so stop retrying it.
+				_ = f.spool.Ack(seq)
+			}
+		}
+	case abandoned:
+		if f.spool != nil {
+			f.opts.Logger.Info("forward: batch left in the spool for the next run",
+				"lines", len(b.Lines), "batch", b.ID)
+		} else {
+			f.opts.Logger.Error("forward: dropping batch (shutting down, no spool configured)",
+				"lines", len(b.Lines), "error", err)
+		}
+	case transient:
+		// Only reachable without a spool, where the retry budget is finite.
+		f.opts.Logger.Error("forward: dropping batch after retries (no spool configured)",
+			"lines", len(b.Lines), "attempts", maxPostAttempts, "error", err)
+	}
+}
+
+// drainSpool re-sends everything a previous run left undelivered, oldest first.
+func (f *Forwarder) drainSpool(ctx context.Context) error {
+	if f.spool == nil {
+		return nil
+	}
+	pending := 0
+	err := f.spool.Pending(func(seq uint64, b spooledBatch) error {
+		pending++
+		outcome, perr := f.post(ctx, b)
+		f.settle(b, seq, outcome, perr)
+		if outcome == abandoned {
+			return ctx.Err()
+		}
+		return nil
+	})
+	if pending > 0 {
+		f.opts.Logger.Info("forward: replayed spooled batches from a previous run", "batches", pending)
+	}
+	if err != nil && ctx.Err() == nil {
+		return fmt.Errorf("forward: replaying the spool: %w", err)
+	}
+	return nil
+}
+
+// post delivers one batch, retrying transient failures with capped backoff.
+//
+// With a spool the retry budget is unbounded: the batch is on disk, so giving
+// up would discard data that is still safely queued. Without one the batch
+// exists only in memory, so it retries a bounded number of times and is then
+// lost — which is why the spool exists.
+func (f *Forwarder) post(ctx context.Context, b spooledBatch) (deliveryOutcome, error) {
 	var lastErr error
-	for attempt := 1; attempt <= maxPostAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		if attempt > 1 {
 			select {
-			case <-time.After(backoffFor(attempt - 1)):
+			case <-time.After(f.backoffFor(attempt - 1)):
 			case <-ctx.Done():
-				f.opts.Logger.Error("forward: giving up on batch (shutting down)", "lines", len(batch), "error", lastErr)
-				return
+				return abandoned, lastErr
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.rawURL, bytes.NewReader([]byte(body)))
-		if err != nil {
-			lastErr = err
-			continue
+		outcome, err := f.attempt(ctx, b)
+		lastErr = err
+		switch outcome {
+		case delivered:
+			f.opts.Logger.Debug("forward: sent batch", "lines", len(b.Lines), "batch", b.ID)
+			return delivered, nil
+		case permanent:
+			return permanent, err
+		case abandoned:
+			return abandoned, err
 		}
-		req.Header.Set("Content-Type", "text/plain")
-		if f.opts.APIKey != "" {
-			req.Header.Set("X-Api-Key", f.opts.APIKey)
+		if f.spool == nil && attempt >= maxPostAttempts {
+			return transient, err
 		}
-		resp, err := f.opts.Client.Do(req)
-		if err != nil {
-			lastErr = err
-			if ctx.Err() != nil {
-				f.opts.Logger.Error("forward: giving up on batch (shutting down)", "lines", len(batch), "error", lastErr)
-				return
-			}
-			continue
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode/100 == 2 {
-			f.opts.Logger.Debug("forward: sent batch", "lines", len(batch))
-			return
-		}
-		lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
-		if !retryable(resp.StatusCode) {
-			f.opts.Logger.Error("forward: dropping batch, server rejected it permanently",
-				"lines", len(batch), "status", resp.StatusCode)
-			return
-		}
-		f.opts.Logger.Warn("forward: retrying batch", "lines", len(batch), "attempt", attempt, "error", lastErr)
+		f.opts.Logger.Warn("forward: retrying batch",
+			"lines", len(b.Lines), "attempt", attempt, "spooled", f.spool != nil, "error", err)
 	}
-	f.opts.Logger.Error("forward: dropping batch after retries", "lines", len(batch), "attempts", maxPostAttempts, "error", lastErr)
 }
