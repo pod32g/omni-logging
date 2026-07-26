@@ -104,12 +104,21 @@ func (f *Forwarder) Run(ctx context.Context) error {
 	return nil
 }
 
-// tail follows a single file, emitting each new complete line. It handles
-// truncation/rotation by resetting to the start when the file shrinks.
+// tail follows a single file, emitting each new complete line.
+//
+// Rotation is detected by file identity rather than by size. Comparing the
+// current size against the read offset only catches a replacement file that is
+// still shorter than the old one; if the new file grows past the old offset
+// between two polls, a size check sees nothing wrong and the reader seeks into
+// the middle of unrelated content, skipping everything before it.
 func (f *Forwarder) tail(ctx context.Context, path string, out chan<- string) {
-	var offset int64
-	if !f.opts.FromStart {
-		if fi, err := os.Stat(path); err == nil {
+	var (
+		offset int64
+		known  os.FileInfo // identity of the file the offset belongs to
+	)
+	if fi, err := os.Stat(path); err == nil {
+		known = fi
+		if !f.opts.FromStart {
 			offset = fi.Size()
 		}
 	}
@@ -127,9 +136,13 @@ func (f *Forwarder) tail(ctx context.Context, path string, out chan<- string) {
 		if err != nil {
 			continue // file may not exist yet; keep polling
 		}
-		if fi.Size() < offset {
-			offset = 0 // rotated/truncated
+		switch {
+		case known != nil && !os.SameFile(known, fi):
+			offset = 0 // rotated: a different file now lives at this path
+		case fi.Size() < offset:
+			offset = 0 // truncated in place
 		}
+		known = fi
 		if fi.Size() == offset {
 			continue
 		}
@@ -145,8 +158,11 @@ func (f *Forwarder) tail(ctx context.Context, path string, out chan<- string) {
 		}
 		reader := bufio.NewReader(file)
 		for {
-			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
+			line, rerr := reader.ReadString('\n')
+			// Only a line terminated by '\n' is complete. Without this check a
+			// line the writer is still mid-way through gets shipped as a whole
+			// event, and its remainder arrives later as a second one.
+			if strings.HasSuffix(line, "\n") {
 				offset += int64(len(line))
 				if trimmed := strings.TrimRight(line, "\r\n"); trimmed != "" {
 					select {
@@ -157,13 +173,16 @@ func (f *Forwarder) tail(ctx context.Context, path string, out chan<- string) {
 					}
 				}
 			}
-			if err != nil {
-				break // EOF or partial line; resume from offset next poll
+			if rerr != nil {
+				break // EOF or partial line; re-read from offset next poll
 			}
 		}
 		file.Close()
 	}
 }
+
+// finalFlushTimeout bounds the last delivery attempt during shutdown.
+const finalFlushTimeout = 5 * time.Second
 
 // send batches lines and POSTs them, flushing on size or interval.
 func (f *Forwarder) send(ctx context.Context, in <-chan string) {
@@ -171,43 +190,84 @@ func (f *Forwarder) send(ctx context.Context, in <-chan string) {
 	defer ticker.Stop()
 	batch := make([]string, 0, f.opts.Batch)
 
-	flush := func() {
+	flush := func(c context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		f.post(ctx, batch)
+		f.post(c, batch)
 		batch = batch[:0]
+	}
+	// On shutdown the parent context is already cancelled, so posting with it
+	// would fail instantly and throw away everything still buffered. Detach it
+	// and give the last batch a short deadline of its own.
+	finalFlush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalFlushTimeout)
+		defer cancel()
+		flush(c)
 	}
 
 	for {
 		select {
 		case line, ok := <-in:
 			if !ok {
-				flush()
+				finalFlush()
 				return
 			}
 			batch = append(batch, line)
 			if len(batch) >= f.opts.Batch {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		case <-ctx.Done():
-			flush()
+			finalFlush()
 			return
 		}
 	}
 }
 
-// post sends a batch of lines, retrying a few times with backoff on failure.
+// Retry policy. Dropping a batch loses logs permanently, so a transient
+// condition — the server restarting, or admission control pushing back with a
+// 429 — must not exhaust the attempts in under two seconds the way a fixed
+// 3-try/500ms schedule did.
+const (
+	maxPostAttempts = 6
+	baseBackoff     = 500 * time.Millisecond
+	maxBackoff      = 30 * time.Second
+)
+
+// retryable reports whether an HTTP status is worth another attempt. 429 and
+// 5xx are transient; other 4xx (bad key, malformed request) will fail
+// identically no matter how many times we resend.
+func retryable(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
+// backoffFor returns the delay before the given attempt, doubling up to a cap.
+func backoffFor(attempt int) time.Duration {
+	d := baseBackoff << (attempt - 1)
+	if d > maxBackoff || d <= 0 {
+		return maxBackoff
+	}
+	return d
+}
+
+// post sends a batch of lines, retrying transient failures with exponential
+// backoff. A batch that still cannot be delivered is dropped with a loud error:
+// the forwarder holds no durable spool, so this is the one place logs can be
+// lost, and it should be visible when it happens.
 func (f *Forwarder) post(ctx context.Context, batch []string) {
 	body := strings.Join(batch, "\n")
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
+	for attempt := 1; attempt <= maxPostAttempts; attempt++ {
+		if attempt > 1 {
 			select {
-			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			case <-time.After(backoffFor(attempt - 1)):
 			case <-ctx.Done():
+				f.opts.Logger.Error("forward: giving up on batch (shutting down)", "lines", len(batch), "error", lastErr)
 				return
 			}
 		}
@@ -223,6 +283,10 @@ func (f *Forwarder) post(ctx context.Context, batch []string) {
 		resp, err := f.opts.Client.Do(req)
 		if err != nil {
 			lastErr = err
+			if ctx.Err() != nil {
+				f.opts.Logger.Error("forward: giving up on batch (shutting down)", "lines", len(batch), "error", lastErr)
+				return
+			}
 			continue
 		}
 		io.Copy(io.Discard, resp.Body)
@@ -232,6 +296,12 @@ func (f *Forwarder) post(ctx context.Context, batch []string) {
 			return
 		}
 		lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+		if !retryable(resp.StatusCode) {
+			f.opts.Logger.Error("forward: dropping batch, server rejected it permanently",
+				"lines", len(batch), "status", resp.StatusCode)
+			return
+		}
+		f.opts.Logger.Warn("forward: retrying batch", "lines", len(batch), "attempt", attempt, "error", lastErr)
 	}
-	f.opts.Logger.Error("forward: failed to send batch after retries", "lines", len(batch), "error", lastErr)
+	f.opts.Logger.Error("forward: dropping batch after retries", "lines", len(batch), "attempts", maxPostAttempts, "error", lastErr)
 }

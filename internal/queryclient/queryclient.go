@@ -31,6 +31,17 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
+// streamClient is used for --follow. http.Client.Timeout is an end-to-end
+// deadline that covers reading the response body, so the request-scoped client
+// would tear a live-tail stream down mid-flight (after 30s, by default). A
+// stream instead ends when its context is cancelled or the server closes it.
+func (c *Client) streamClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{}
+}
+
 func (c *Client) urlFor(path string, params map[string]string) string {
 	v := url.Values{}
 	for k, val := range params {
@@ -80,7 +91,7 @@ func (c *Client) Follow(ctx context.Context, params map[string]string, onEvent f
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.streamClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -89,6 +100,8 @@ func (c *Client) Follow(ctx context.Context, params map[string]string, onEvent f
 		return fmt.Errorf("tail: %s", resp.Status)
 	}
 	sc := bufio.NewScanner(resp.Body)
+	// Matches the server's ingest line cap, so a large but accepted event
+	// cannot end the stream with "token too long".
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
@@ -126,7 +139,8 @@ func WriteNDJSON(w io.Writer, events []model.LogEvent) error {
 
 // WriteTable writes a fixed-column, human-readable table.
 func WriteTable(w io.Writer, events []model.LogEvent) error {
-	if _, err := fmt.Fprintf(w, "%-24s  %-5s  %-16s  %s\n", "TIMESTAMP", "LEVEL", "SERVICE", "MESSAGE"); err != nil {
+	if _, err := fmt.Fprintf(w, "%s  %s  %s  %s\n",
+		pad("TIMESTAMP", 24), pad("LEVEL", 5), pad("SERVICE", 16), "MESSAGE"); err != nil {
 		return err
 	}
 	for _, e := range events {
@@ -134,9 +148,7 @@ func WriteTable(w io.Writer, events []model.LogEvent) error {
 		if msg == "" {
 			msg = strings.ReplaceAll(e.Raw, "\n", " ")
 		}
-		if _, err := fmt.Fprintf(w, "%-24s  %-5s  %-16s  %s\n",
-			e.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			truncate(string(e.Level), 5), truncate(e.Service, 16), msg); err != nil {
+		if err := writeTableRow(w, e, msg); err != nil {
 			return err
 		}
 	}
@@ -147,21 +159,29 @@ func WriteTable(w io.Writer, events []model.LogEvent) error {
 // row or NDJSON), used by Follow.
 func FormatEventLine(w io.Writer, e model.LogEvent, format string) error {
 	if format == "table" {
-		msg := strings.ReplaceAll(e.Message, "\n", " ")
-		_, err := fmt.Fprintf(w, "%-24s  %-5s  %-16s  %s\n",
-			e.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			truncate(string(e.Level), 5), truncate(e.Service, 16), msg)
-		return err
+		return writeTableRow(w, e, strings.ReplaceAll(e.Message, "\n", " "))
 	}
 	return json.NewEncoder(w).Encode(e)
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+func writeTableRow(w io.Writer, e model.LogEvent, msg string) error {
+	_, err := fmt.Fprintf(w, "%s  %s  %s  %s\n",
+		pad(e.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), 24),
+		pad(string(e.Level), 5), pad(e.Service, 16), msg)
+	return err
+}
+
+// pad truncates s to n characters and pads it out to that width. Columns are
+// measured in runes, not bytes: the fmt "%-16s" verb pads by byte length, which
+// misaligns any row containing non-ASCII text, and byte slicing would cut a
+// multi-byte rune in half.
+func pad(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		if n <= 1 {
+			return string(r[:n])
+		}
+		return string(r[:n-1]) + "…"
 	}
-	if n <= 1 {
-		return s[:n]
-	}
-	return s[:n-1] + "…"
+	return s + strings.Repeat(" ", n-len(r))
 }

@@ -25,6 +25,7 @@ type Options struct {
 	BufferSize    int           // capacity of the in-memory queue
 	BatchSize     int           // max events written per transaction
 	FlushInterval time.Duration // max time a partial batch waits before writing
+	MaxBodyBytes  int64         // per-request body cap (default 32 MiB)
 	Now           func() time.Time
 	Logger        *slog.Logger
 	WAL           *wal.WAL           // durable write-ahead log; nil = in-memory only (v1 behavior)
@@ -46,6 +47,9 @@ func (o *Options) withDefaults() {
 	}
 	if o.FlushInterval <= 0 {
 		o.FlushInterval = 500 * time.Millisecond
+	}
+	if o.MaxBodyBytes <= 0 {
+		o.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	if o.Now == nil {
 		o.Now = time.Now

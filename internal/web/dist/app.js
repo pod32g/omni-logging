@@ -176,8 +176,11 @@ function renderResults(res, append) {
   if (!append) rowsEl.replaceChildren();
   (res.events || []).forEach((e) => rowsEl.appendChild(renderRow(e)));
   const shown = rowsEl.children.length;
-  $("#match-count").textContent = fmtNum(res.total) + " matching events";
-  $("#match-sub").textContent = shown < res.total ? `showing ${fmtNum(shown)}` : "";
+  // The server stops counting past a cap rather than walking an unbounded
+  // match set, so a capped total is a lower bound: show it as "50,000+".
+  const total = fmtNum(res.total) + (res.total_capped ? "+" : "");
+  $("#match-count").textContent = total + " matching events";
+  $("#match-sub").textContent = (res.total_capped || shown < res.total) ? `showing ${fmtNum(shown)}` : "";
   $("#search-empty").hidden = shown > 0;
   searchCursor = res.next_cursor || "";
   $("#load-more").hidden = !searchCursor;
@@ -429,9 +432,12 @@ function renderKeys() {
   });
 }
 
+// Operational counters come from /api/v1/status, not the liveness probe:
+// /api/v1/healthz deliberately reports nothing but {"status":"ok"} so an
+// unauthenticated caller cannot read traffic volumes off it.
 async function loadStatus() {
   try {
-    const h = await api("/api/v1/healthz");
+    const h = await api("/api/v1/status");
     const g = $("#cfg-status");
     g.replaceChildren();
     const add = (k, v) => { g.appendChild(el("div", "st-k", k)); g.appendChild(el("div", "st-v", String(v))); };

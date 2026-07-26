@@ -11,6 +11,11 @@ import (
 	"github.com/pod32g/omni-logging/internal/query"
 )
 
+// maxConcurrentExports bounds how many exports may stream at once. Exports run
+// long by design and each holds a read connection for its whole duration, so
+// leaving them unbounded lets a few downloads crowd out interactive searches.
+const maxConcurrentExports = 2
+
 // handleExport streams all events matching the query (ignoring the search limit)
 // as NDJSON, CSV, or a JSON array, for downloads decoupled from the UI cap.
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
@@ -24,30 +29,61 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = "ndjson"
 	}
+	if format != "ndjson" && format != "csv" && format != "json" {
+		http.Error(w, "unsupported format (use ndjson, csv, or json)", http.StatusBadRequest)
+		return
+	}
+
+	select {
+	case s.exportSlots <- struct{}{}:
+		defer func() { <-s.exportSlots }()
+	default:
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many concurrent exports; retry shortly", http.StatusTooManyRequests)
+		return
+	}
+
 	flusher, _ := w.(http.Flusher)
 
 	switch format {
 	case "ndjson":
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Content-Disposition", `attachment; filename="omnilog-export.ndjson"`)
-		s.exportNDJSON(w, r, q, flusher)
+		s.finishExport(r, "ndjson", s.exportNDJSON(w, r, q, flusher))
 	case "csv":
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", `attachment; filename="omnilog-export.csv"`)
-		s.exportCSV(w, r, q, flusher)
+		s.finishExport(r, "csv", s.exportCSV(w, r, q, flusher))
 	case "json":
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="omnilog-export.json"`)
-		s.exportJSON(w, r, q, flusher)
-	default:
-		http.Error(w, "unsupported format (use ndjson, csv, or json)", http.StatusBadRequest)
+		s.finishExport(r, "json", s.exportJSON(w, r, q, flusher))
 	}
 }
 
-func (s *Server) exportNDJSON(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) {
+// finishExport decides how a failed export ends. Because the 200 and the first
+// rows are already on the wire, there is no status code left to change — so
+// rather than let the client save a silently truncated file that looks
+// complete, abort the connection. net/http closes it without a terminating
+// chunk, which every HTTP client reports as a failed transfer.
+func (s *Server) finishExport(r *http.Request, format string, err error) {
+	if err == nil {
+		return
+	}
+	if r.Context().Err() != nil {
+		// The client hung up or the request deadline passed; nothing to report.
+		s.logger.Debug("export abandoned by client", "format", format, "error", err)
+		return
+	}
+	s.logger.Error("export failed mid-stream; aborting the response",
+		"format", format, "request_id", requestIDFromCtx(r.Context()), "error", err)
+	panic(http.ErrAbortHandler)
+}
+
+func (s *Server) exportNDJSON(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) error {
 	enc := json.NewEncoder(w)
 	n := 0
-	err := s.store.Stream(r.Context(), q, func(e model.LogEvent) error {
+	return s.store.Stream(r.Context(), q, func(e model.LogEvent) error {
 		if err := enc.Encode(e); err != nil {
 			return err
 		}
@@ -57,44 +93,51 @@ func (s *Server) exportNDJSON(w http.ResponseWriter, r *http.Request, q query.Qu
 		}
 		return nil
 	})
-	if err != nil {
-		s.logger.Error("export ndjson failed", "error", err)
-	}
 }
 
-func (s *Server) exportJSON(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) {
+func (s *Server) exportJSON(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) error {
 	first := true
-	w.Write([]byte("["))
+	if _, err := w.Write([]byte("[")); err != nil {
+		return err
+	}
 	enc := json.NewEncoder(w)
 	err := s.store.Stream(r.Context(), q, func(e model.LogEvent) error {
 		if !first {
-			w.Write([]byte(","))
+			if _, werr := w.Write([]byte(",")); werr != nil {
+				return werr
+			}
 		}
 		first = false
 		return enc.Encode(e) // trailing newline is harmless inside the array
 	})
 	if err != nil {
-		s.logger.Error("export json failed", "error", err)
+		// Leave the array unterminated: a truncated stream must not parse as a
+		// complete document.
+		return err
 	}
-	w.Write([]byte("]"))
+	_, err = w.Write([]byte("]"))
+	return err
 }
 
-func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) {
+func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request, q query.Query, flusher http.Flusher) error {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"timestamp", "level", "service", "source", "message", "attributes"})
 	n := 0
 	err := s.store.Stream(r.Context(), q, func(e model.LogEvent) error {
 		attrs := ""
 		if len(e.Attributes) > 0 {
-			b, _ := json.Marshal(e.Attributes)
+			b, merr := json.Marshal(e.Attributes)
+			if merr != nil {
+				return merr
+			}
 			attrs = string(b)
 		}
-		if err := cw.Write([]string{
+		if werr := cw.Write([]string{
 			csvSafeCell(e.Timestamp.UTC().Format(time.RFC3339Nano)),
 			csvSafeCell(string(e.Level)), csvSafeCell(e.Service), csvSafeCell(e.Source),
 			csvSafeCell(e.Message), csvSafeCell(attrs),
-		}); err != nil {
-			return err
+		}); werr != nil {
+			return werr
 		}
 		n++
 		if n%500 == 0 {
@@ -107,8 +150,9 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request, q query.Query
 	})
 	cw.Flush()
 	if err != nil {
-		s.logger.Error("export csv failed", "error", err)
+		return err
 	}
+	return cw.Error()
 }
 
 // csvSafeCell prevents spreadsheet applications from interpreting untrusted

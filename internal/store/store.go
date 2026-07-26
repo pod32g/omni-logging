@@ -15,11 +15,14 @@ import (
 // SearchResult is the outcome of a Search: the (limited) matching events plus
 // the total number of matches and how long the query took.
 type SearchResult struct {
-	Events     []model.LogEvent `json:"events"`
-	Count      int              `json:"count"` // number of events returned
-	Total      int64            `json:"total"` // total matches ignoring the limit
-	TookMs     int64            `json:"took_ms"`
-	NextCursor string           `json:"next_cursor,omitempty"` // keyset cursor for the next page (empty = no more)
+	Events []model.LogEvent `json:"events"`
+	Count  int              `json:"count"` // number of events returned
+	Total  int64            `json:"total"` // total matches ignoring the limit
+	// TotalCapped reports that counting stopped early and the real total is
+	// greater than Total (see sqlite.MaxExactCount). Render as "Total+".
+	TotalCapped bool   `json:"total_capped,omitempty"`
+	TookMs      int64  `json:"took_ms"`
+	NextCursor  string `json:"next_cursor,omitempty"` // keyset cursor for the next page (empty = no more)
 }
 
 // Bucket is a single histogram column: a count of events in [Start, Start+width).
@@ -56,7 +59,9 @@ type Store interface {
 	// Search returns matching events plus counts. Results are ordered newest-first
 	// by event time (ties broken by ID) unless q.Order == query.OrderOldest, and
 	// capped at q.Limit. SearchResult.Count is the number returned; Total is the
-	// number of matches ignoring the limit. When q sets a keyset cursor
+	// number of matches ignoring the limit, which an implementation may stop
+	// counting early (setting TotalCapped) rather than walk an unbounded match
+	// set. When q sets a keyset cursor
 	// (AfterTS/AfterID) results continue after it; NextCursor carries the cursor
 	// for the following page.
 	Search(ctx context.Context, q query.Query) (SearchResult, error)

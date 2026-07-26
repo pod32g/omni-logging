@@ -15,7 +15,12 @@ const heartbeatInterval = 20 * time.Second
 // Handler returns an http.Handler that streams matching events as
 // Server-Sent Events. The query is taken from the same parameters as /search
 // (q, from, to, last). now is injected for testability.
-func Handler(hub *Hub, now func() time.Time) http.HandlerFunc {
+//
+// closing, when non-nil, is closed as the process starts shutting down. Streams
+// end as soon as it fires: net/http's Shutdown waits for handlers to return but
+// does not cancel their request contexts, so without this an idle live-tail
+// client would hold graceful shutdown open for its entire timeout.
+func Handler(hub *Hub, now func() time.Time, closing <-chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -56,6 +61,10 @@ func Handler(hub *Hub, now func() time.Time) http.HandlerFunc {
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-closing:
+				fmt.Fprint(w, ": server shutting down\n\n")
+				flusher.Flush()
 				return
 			case <-ticker.C:
 				fmt.Fprint(w, ": ping\n\n")

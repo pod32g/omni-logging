@@ -1,1 +1,3 @@
+CO-ROUTINE (subquery-1)
 SEARCH logs USING COVERING INDEX idx_logs_level (level=?)
+SCAN (subquery-1)

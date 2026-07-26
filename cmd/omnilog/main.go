@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -110,6 +111,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		metricsPub = fs.Bool("metrics-public", false, "allow /metrics from non-loopback clients")
 		tlsCert    = fs.String("tls-cert", "", "TLS certificate file (enables HTTPS with -tls-key)")
 		tlsKey     = fs.String("tls-key", "", "TLS key file")
+		hsts       = fs.Bool("hsts", false, "send Strict-Transport-Security when TLS is on (opt-in; browsers cache it for a year)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -148,6 +150,9 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	if set["tls-key"] {
 		cfg.TLSKey = *tlsKey
+	}
+	if set["hsts"] {
+		cfg.HSTS = *hsts
 	}
 
 	store, err := sqlite.Open(cfg.DBPath)
@@ -228,6 +233,10 @@ func runServe(args []string, logger *slog.Logger) error {
 	ing.Start()
 	defer ing.Stop()
 
+	// Closed at the start of shutdown so live-tail streams end promptly instead
+	// of keeping graceful shutdown busy until its deadline.
+	closing := make(chan struct{})
+
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Store:    store,
@@ -237,6 +246,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		Logger:   logger,
 		Version:  version,
 		Settings: mgr,
+		Closing:  closing,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -248,12 +258,21 @@ func runServe(args []string, logger *slog.Logger) error {
 
 	httpSrv := newHTTPServer(cfg.Addr, srv.Handler())
 
+	// ListenAndServe returns as soon as Shutdown closes the listeners, while
+	// Shutdown keeps draining in-flight requests. Waiting on shutdownDone before
+	// returning is what keeps this function's deferred ing.Stop()/store.Close()
+	// from pulling the store out from under a handler that is still running.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		logger.Info("shutting down")
+		close(closing)
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
+		if serr := httpSrv.Shutdown(shutCtx); serr != nil {
+			logger.Warn("graceful shutdown did not complete in time", "error", serr)
+		}
 	}()
 
 	logger.Info("omnilog serving",
@@ -265,10 +284,11 @@ func runServe(args []string, logger *slog.Logger) error {
 	} else {
 		err = httpSrv.ListenAndServe()
 	}
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
-	return err
+	<-shutdownDone // in-flight requests are done; the deferred teardown is now safe
+	return nil
 }
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
@@ -279,6 +299,9 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    64 << 10,
+		// Stated explicitly rather than inherited from the Go default, so a
+		// toolchain change cannot quietly lower the floor.
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 		// WriteTimeout stays unset because live-tail and exports intentionally stream.
 	}
 }

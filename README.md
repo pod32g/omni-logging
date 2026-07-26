@@ -15,10 +15,11 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
-- **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a reference UI at `/docs`.
-- **Settings page** — edit retention, rate limits, quotas, log level, and ingest keys live (persisted in the DB, applied without a restart) via the UI or `GET`/`PUT /api/v1/config`. The admin token is browser-side only and not editable from the UI.
+- **OpenAPI** — a versioned 3.1 contract at `/openapi.json` with a self-hosted reference UI at `/docs` (no CDN; works air-gapped).
+- **Settings page** — edit retention, rate limits, quotas, log level, and ingest keys live (persisted in the DB, applied without a restart) via the UI or `GET`/`PUT /api/v1/config`. `PUT` merges: fields you omit keep their current value, so clearing one takes an explicit zero (e.g. `"ingest_keys": []`). The admin token is browser-side only and not editable from the UI.
 - **Minimal auth** — per-source ingest API keys + an admin token for query/UI.
 - **Admission control** — per-key token-bucket rate limits + daily event/byte quotas (`rate_limit_per_sec`, `rate_burst`, `daily_quota_events`, `daily_quota_bytes`; `0` = off). Rejections return `429 {reason}` and increment `omnilog_ingest_rejected_total`.
+  `rate_limit_per_sec` counts **requests, not events** — one request may carry a whole batch. Use the daily quotas to bound event and byte volume.
 
 ## Quick start
 
@@ -116,6 +117,14 @@ set `--metrics-public` or `OMNILOG_METRICS_PUBLIC=true` only on a trusted networ
 | `GET /metrics` | Prometheus text exposition: ingest counters, store query latency, live-tail subscribers/drops, HTTP request count/latency, `omnilog_build_info` (loopback-only by default). |
 | `GET /api/v1/healthz` | **Liveness** — process is up (always `200`; used by the container HEALTHCHECK and the deploy probe). |
 | `GET /api/v1/readyz` | **Readiness** — `200` only when the backend store is reachable, else `503`. |
+| `GET /api/v1/status` | **Operational snapshot** — version, live-tail subscribers, ingest counters. Behind the admin token: unlike liveness, these numbers describe traffic shape. Powers the UI's Settings → Server status panel. |
+
+> **Reverse proxies and `/metrics`.** The loopback check looks at the immediate
+> peer address. Behind a proxy — including the `netviz-sidecar` in
+> [`docker-compose.yml`](docker-compose.yml) — scrapes arrive from the proxy's
+> address, not loopback, so `/metrics` returns `404`. Either scrape from inside
+> the container's network namespace, or set `OMNILOG_METRICS_PUBLIC=true` and
+> restrict access at the proxy.
 
 Metrics are emitted by a small in-repo registry (no `client_golang` dependency), so
 the binary stays self-contained. Example scrape config:
@@ -158,6 +167,24 @@ omnilog healthcheck --url http://localhost:8080/api/v1/healthz  # container HEAL
 Run locally with Compose: `docker compose up --build -d` (UI on `:8080`,
 data in the `omnilog-data` volume). Set `OMNILOG_ADMIN_TOKEN` / `OMNILOG_INGEST_KEYS`
 in a `.env` file to enable auth.
+
+### Optional hardening
+
+Everything here is **off by default** — the server runs open over plain HTTP so a
+fresh or homelab install is never locked out of itself. Turn these on when the
+deployment warrants it:
+
+| Setting | Flag / env | Effect when unset (default) |
+|---|---|---|
+| Admin token | `--admin-token` / `OMNILOG_ADMIN_TOKEN` | Query, export, tail, status and config endpoints are open. |
+| Ingest keys | `--ingest-key` / `OMNILOG_INGEST_KEYS` | Ingestion is unauthenticated. |
+| TLS | `--tls-cert` + `--tls-key` | Plain HTTP. TLS 1.2 is the floor when enabled. |
+| HSTS | `--hsts` / `OMNILOG_HSTS=true` | No `Strict-Transport-Security` header. |
+
+> **On HSTS:** browsers cache the policy for a year, so enabling it pins the
+> origin to HTTPS for every client that has visited it — reverting to plain HTTP
+> then requires clearing browser state. It only takes effect when TLS is also
+> configured, and it stays opt-in for exactly this reason.
 
 ## Development
 

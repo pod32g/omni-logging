@@ -102,6 +102,38 @@
     },
     "/metrics": {
       "get": { "tags": ["ops"], "summary": "Prometheus metrics", "responses": { "200": { "description": "Exposition", "content": { "text/plain": {} } } } }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "Operational snapshot (version, live-tail subscribers, ingest counters)",
+        "description": "Admin-guarded on purpose: unlike the liveness probe, these counters describe traffic shape.",
+        "security": [{ "adminToken": [] }],
+        "responses": { "200": { "description": "Status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Status" } } } } }
+      }
+    },
+    "/api/v1/config": {
+      "get": {
+        "tags": ["ops"],
+        "summary": "Read the runtime-mutable settings",
+        "security": [{ "adminToken": [] }],
+        "responses": {
+          "200": { "description": "Effective settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } } },
+          "503": { "description": "Settings management not enabled" }
+        }
+      },
+      "put": {
+        "tags": ["ops"],
+        "summary": "Update the runtime-mutable settings (validated, persisted, applied without a restart)",
+        "description": "Fields omitted from the body keep their current value. Clearing one takes an explicit zero value, e.g. \"ingest_keys\": []. The admin token is not editable here.",
+        "security": [{ "adminToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } } },
+        "responses": {
+          "200": { "description": "Effective settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } } },
+          "400": { "description": "Invalid settings" },
+          "503": { "description": "Settings management not enabled" }
+        }
+      }
     }
   },
   "components": {
@@ -138,8 +170,30 @@
           "events": { "type": "array", "items": { "$ref": "#/components/schemas/LogEvent" } },
           "count": { "type": "integer" },
           "total": { "type": "integer" },
+          "total_capped": { "type": "boolean", "description": "Counting stopped early; the real total exceeds total (render as \"total+\")" },
           "took_ms": { "type": "integer" },
           "next_cursor": { "type": "string" }
+        }
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "retention_days": { "type": "integer", "description": "Delete events older than N days (0 = keep forever)" },
+          "rate_limit_per_sec": { "type": "number", "description": "Per-key ingest REQUEST token refill per second (0 = off). Counts requests, not events." },
+          "rate_burst": { "type": "integer", "description": "Token-bucket capacity" },
+          "daily_quota_events": { "type": "integer", "description": "Max accepted events per key per UTC day (0 = unlimited)" },
+          "daily_quota_bytes": { "type": "integer", "description": "Max ingested bytes per key per UTC day (0 = unlimited)" },
+          "log_level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+          "ingest_keys": { "type": "array", "items": { "type": "string" }, "description": "Empty means ingestion is unauthenticated (dev mode)" }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "version": { "type": "string" },
+          "subscribers": { "type": "integer", "description": "Active live-tail subscribers" },
+          "ingest": { "type": "object", "properties": { "received": { "type": "integer" }, "written": { "type": "integer" }, "dropped": { "type": "integer" }, "rejected": { "type": "integer" }, "queued": { "type": "integer" } } }
         }
       },
       "StatsResult": {

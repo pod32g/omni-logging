@@ -27,6 +27,10 @@ type Config struct {
 	MetricsPublic   bool     `yaml:"metrics_public"`
 	TLSCert         string   `yaml:"tls_cert"`
 	TLSKey          string   `yaml:"tls_key"`
+	// HSTS sends Strict-Transport-Security when TLS is on. Off by default and
+	// deliberately opt-in: browsers remember the policy for a year, so enabling
+	// it pins the origin to HTTPS and would lock out a plain-HTTP fallback.
+	HSTS bool `yaml:"hsts"`
 
 	// Admission control (per ingest key). Zero = disabled.
 	RateLimitPerSec  float64 `yaml:"rate_limit_per_sec"` // request token refill/sec per key
@@ -101,6 +105,11 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("OMNILOG_TLS_KEY"); v != "" {
 		c.TLSKey = v
+	}
+	if v := os.Getenv("OMNILOG_HSTS"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			c.HSTS = enabled
+		}
 	}
 	if v := os.Getenv("OMNILOG_LOG_LEVEL"); v != "" {
 		c.LogLevel = v

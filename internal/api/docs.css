@@ -1,0 +1,112 @@
+/* Styles for the built-in API reference (/docs). Self-hosted so the page needs
+   no third-party CDN and can run under the strict default CSP. */
+
+:root {
+  --bg: #ffffff;
+  --panel: #f7f8fa;
+  --border: #e2e5ea;
+  --text: #1b1f27;
+  --muted: #626b7a;
+  --accent: #2348e0;
+  --code-bg: #f0f2f5;
+  --get: #2563eb;
+  --post: #15803d;
+  --put: #b45309;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b;
+    --panel: #181c24;
+    --border: #262c37;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #7f96f5;
+    --code-bg: #1e232c;
+    --get: #7aa2f7;
+    --post: #6ec38a;
+    --put: #e0a758;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 1.5rem 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.hdr, .toc, main, .schemas { max-width: 960px; margin: 0 auto; }
+
+.hdr { padding: 2.5rem 0 1.25rem; border-bottom: 1px solid var(--border); }
+.hdr h1 { margin: 0; font-size: 1.75rem; letter-spacing: -0.01em; }
+.ver { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
+.desc { margin: 0.9rem 0 0; color: var(--muted); max-width: 70ch; }
+.src { margin: 0.9rem 0 0; font-size: 0.85rem; color: var(--muted); }
+
+a { color: var(--accent); }
+
+.toc { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 1.25rem 0; }
+.toc a {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.3rem 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); text-decoration: none; color: var(--text);
+  font-size: 0.82rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.toc a:hover { border-color: var(--accent); }
+
+.op {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); padding: 1.1rem 1.25rem; margin: 0 0 1rem;
+  scroll-margin-top: 1rem;
+}
+.op-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem; font-weight: 600; word-break: break-all;
+}
+.method {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem; border-radius: 4px; border: 1px solid currentColor;
+}
+.method.get { color: var(--get); }
+.method.post { color: var(--post); }
+.method.put { color: var(--put); }
+
+.tag, .auth {
+  font-size: 0.7rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.05em; border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.1rem 0.5rem;
+}
+.summary { margin: 0.55rem 0 0; }
+.op-desc { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; }
+
+h3 {
+  margin: 1.1rem 0 0.4rem; font-size: 0.75rem; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted);
+}
+h2 { max-width: 960px; margin: 2.5rem auto 1rem; font-size: 1.15rem; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+th, td { text-align: left; padding: 0.4rem 0.6rem 0.4rem 0; vertical-align: top; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; font-size: 0.78rem; }
+td.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+td.desc-cell { color: var(--muted); }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg); padding: 0.08rem 0.3rem; border-radius: 4px; font-size: 0.85em;
+}
+pre {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.8rem 0.9rem; overflow-x: auto; font-size: 0.82rem; margin: 0.4rem 0 0;
+}
+pre code { background: none; padding: 0; }
+
+.req { color: var(--put); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.loading, .error { color: var(--muted); padding: 2rem 0; }
+.error { color: #dc2626; }

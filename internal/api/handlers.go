@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/query"
-	"github.com/pod32g/omni-logging/internal/settings"
 )
 
 // handleSearch executes a search and returns matching events plus the total.
@@ -75,13 +75,18 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.settings.Current())
 }
 
-// handleConfigPut replaces the mutable settings (validated, persisted, hot-applied).
+// handleConfigPut updates the mutable settings (validated, persisted,
+// hot-applied). Fields absent from the request body keep their current value:
+// decoding into a zero struct instead would make a one-field update silently
+// reset retention, rate limits, quotas — and every ingest key, disabling ingest
+// auth. Clearing a field therefore takes an explicit zero value (e.g.
+// "ingest_keys": []).
 func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	if s.settings == nil {
 		http.Error(w, "settings management not enabled", http.StatusServiceUnavailable)
 		return
 	}
-	var next settings.Mutable
+	next := s.settings.Current()
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&next); err != nil {
 		http.Error(w, "invalid settings JSON: "+err.Error(), http.StatusBadRequest)
 		return
@@ -97,6 +102,30 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("settings updated", "request_id", requestIDFromCtx(r.Context()))
 	writeJSON(w, http.StatusOK, s.settings.Current())
+}
+
+// statusResponse is the operational snapshot behind GET /api/v1/status.
+type statusResponse struct {
+	Status      string          `json:"status"`
+	Version     string          `json:"version"`
+	Subscribers int             `json:"subscribers"`
+	Ingest      *ingest.Metrics `json:"ingest,omitempty"`
+}
+
+// handleStatus reports version and live ingest/tail counters. Unlike the
+// unauthenticated health probe, this sits behind the admin guard, because the
+// numbers describe traffic shape and are not something an unauthenticated
+// caller should be able to poll.
+func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	resp := statusResponse{Status: "ok", Version: s.version}
+	if s.hub != nil {
+		resp.Subscribers = s.hub.SubscriberCount()
+	}
+	if s.ingestor != nil {
+		m := s.ingestor.Metrics()
+		resp.Ingest = &m
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleReady is the readiness probe: it reports 200 only when the backend

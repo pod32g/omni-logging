@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"net/http"
 	"testing"
 	"time"
@@ -13,5 +14,13 @@ func TestNewHTTPServerHasResourceLimits(t *testing.T) {
 	}
 	if srv.MaxHeaderBytes != 64<<10 {
 		t.Fatalf("MaxHeaderBytes = %d, want %d", srv.MaxHeaderBytes, 64<<10)
+	}
+	// Stated rather than inherited, so a toolchain default cannot lower it.
+	if srv.TLSConfig == nil || srv.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("TLS MinVersion is not pinned to 1.2: %+v", srv.TLSConfig)
+	}
+	// WriteTimeout must stay unset: exports and live tail stream for a long time.
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want unset so streaming responses are not cut off", srv.WriteTimeout)
 	}
 }

@@ -237,10 +237,21 @@ func searchSQL(q query.Query) (string, []any) {
 	return sqlStr, append(w.args, q.Limit)
 }
 
-// countSQL builds the total-count statement (ignoring the limit/cursor) and args.
+// MaxExactCount bounds the total-match count a search reports. Counting an
+// unbounded match set means visiting every matching row, which on a large
+// database costs far more than the page of results the caller actually wants.
+// Past this many matches the count stops early and SearchResult.TotalCapped is
+// set, so a UI can render "50,000+" instead of paying for an exact number.
+const MaxExactCount = 50000
+
+// countSQL builds the total-count statement (ignoring the limit/cursor) and
+// args. The inner LIMIT lets SQLite stop once the cap is exceeded; we ask for
+// one row past the cap so the caller can tell "exactly the cap" from "more".
 func countSQL(q query.Query) (string, []any) {
 	w := buildWhere(q)
-	return fmt.Sprintf("SELECT COUNT(*) %s %s", fromClause(w.needFTS), w.sqlStr()), w.args
+	return fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 %s %s LIMIT ?)",
+			fromClause(w.needFTS), w.sqlStr()),
+		append(w.args, MaxExactCount+1)
 }
 
 // readTimeout bounds the worst case of an interactive read so a single broad
@@ -256,7 +267,7 @@ func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, err
 	start := time.Now()
 
 	sqlStr, args := searchSQL(q)
-	rows, err := d.db.QueryContext(ctx, sqlStr, args...)
+	rows, err := d.ro.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return store.SearchResult{}, fmt.Errorf("search query: %w", err)
 	}
@@ -274,7 +285,7 @@ func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, err
 		return store.SearchResult{}, err
 	}
 
-	total, err := d.count(ctx, q)
+	total, capped, err := d.count(ctx, q)
 	if err != nil {
 		return store.SearchResult{}, err
 	}
@@ -287,11 +298,12 @@ func (d *DB) Search(ctx context.Context, q query.Query) (store.SearchResult, err
 	}
 
 	return store.SearchResult{
-		Events:     events,
-		Count:      len(events),
-		Total:      total,
-		TookMs:     time.Since(start).Milliseconds(),
-		NextCursor: next,
+		Events:      events,
+		Count:       len(events),
+		Total:       total,
+		TotalCapped: capped,
+		TookMs:      time.Since(start).Milliseconds(),
+		NextCursor:  next,
 	}, nil
 }
 
@@ -311,11 +323,13 @@ func streamSQL(q query.Query) (string, []any) {
 		fromClause(w.needFTS), w.sqlStr(), order, order), w.args
 }
 
-// Stream invokes fn for every matching event without buffering them all.
+// Stream invokes fn for every matching event without buffering them all. It
+// runs on the read pool, so however long the consumer takes, the write
+// connection stays free for ingestion.
 func (d *DB) Stream(ctx context.Context, q query.Query, fn func(model.LogEvent) error) error {
 	q.Normalize()
 	sqlStr, args := streamSQL(q)
-	rows, err := d.db.QueryContext(ctx, sqlStr, args...)
+	rows, err := d.ro.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return fmt.Errorf("stream query: %w", err)
 	}
@@ -332,13 +346,17 @@ func (d *DB) Stream(ctx context.Context, q query.Query, fn func(model.LogEvent) 
 	return rows.Err()
 }
 
-func (d *DB) count(ctx context.Context, q query.Query) (int64, error) {
+// count returns the number of matches, stopping at MaxExactCount. capped
+// reports that the real total is higher than the returned value.
+func (d *DB) count(ctx context.Context, q query.Query) (n int64, capped bool, err error) {
 	sqlStr, args := countSQL(q)
-	var n int64
-	if err := d.db.QueryRowContext(ctx, sqlStr, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count query: %w", err)
+	if err := d.ro.QueryRowContext(ctx, sqlStr, args...).Scan(&n); err != nil {
+		return 0, false, fmt.Errorf("count query: %w", err)
 	}
-	return n, nil
+	if n > MaxExactCount {
+		return MaxExactCount, true, nil
+	}
+	return n, false, nil
 }
 
 // scanEvent reads a single logs row into a LogEvent.
@@ -378,7 +396,7 @@ func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error
 
 	// Histogram: integer-divide ts into buckets.
 	histSQL, histArgs := histogramSQL(q, bucketNanos)
-	hrows, err := d.db.QueryContext(ctx, histSQL, histArgs...)
+	hrows, err := d.ro.QueryContext(ctx, histSQL, histArgs...)
 	if err != nil {
 		return store.StatsResult{}, fmt.Errorf("histogram query: %w", err)
 	}
@@ -428,7 +446,7 @@ func facetSQL(q query.Query, col string) (string, []any) {
 // facet returns the top values and counts for a column under the given filter.
 func (d *DB) facet(ctx context.Context, q query.Query, col string) ([]store.Facet, error) {
 	sqlStr, args := facetSQL(q, col)
-	rows, err := d.db.QueryContext(ctx, sqlStr, args...)
+	rows, err := d.ro.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, fmt.Errorf("facet %s: %w", col, err)
 	}

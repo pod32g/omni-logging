@@ -28,6 +28,10 @@ type Deps struct {
 	Metrics  *metrics.Registry // metrics registry (created if nil)
 	Version  string            // build version, surfaced as omnilog_build_info
 	Settings *settings.Manager // runtime-mutable config (nil = static cfg only)
+	// Closing is closed when the process begins shutting down. Live-tail
+	// streams watch it so they end promptly instead of holding graceful
+	// shutdown open for its full timeout. nil means "never closes".
+	Closing <-chan struct{}
 }
 
 // Server holds API dependencies and builds the HTTP handler.
@@ -41,6 +45,11 @@ type Server struct {
 	now      func() time.Time
 	settings *settings.Manager
 	version  string
+	closing  <-chan struct{}
+
+	// exportSlots bounds concurrent exports so a handful of long downloads
+	// cannot occupy every read connection and starve interactive searches.
+	exportSlots chan struct{}
 
 	metrics  *metrics.Registry
 	httpReqs *metrics.CounterVec
@@ -63,16 +72,18 @@ func New(d Deps) *Server {
 		d.Metrics = metrics.NewRegistry()
 	}
 	s := &Server{
-		cfg:      d.Config,
-		store:    d.Store,
-		ingestor: d.Ingestor,
-		hub:      d.Hub,
-		ui:       d.UI,
-		logger:   d.Logger,
-		now:      d.Now,
-		settings: d.Settings,
-		version:  d.Version,
-		metrics:  d.Metrics,
+		cfg:         d.Config,
+		store:       d.Store,
+		ingestor:    d.Ingestor,
+		hub:         d.Hub,
+		ui:          d.UI,
+		logger:      d.Logger,
+		now:         d.Now,
+		settings:    d.Settings,
+		version:     d.Version,
+		closing:     d.Closing,
+		metrics:     d.Metrics,
+		exportSlots: make(chan struct{}, maxConcurrentExports),
 	}
 	s.registerMetrics(d.Version)
 	return s
@@ -106,33 +117,69 @@ func (s *Server) registerMetrics(version string) {
 	}
 }
 
-// Handler returns the fully wired HTTP handler with middleware applied.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+// route is one registered endpoint. Handler installs these on the mux and the
+// OpenAPI conformance test walks the same slice, so an endpoint cannot ship
+// without a decision about whether it belongs in the published contract.
+type route struct {
+	Method  string
+	Path    string
+	handler http.Handler
+	// InSpec marks the endpoint as part of the documented API surface. It is
+	// false for the contract document itself and the human-facing viewer that
+	// renders it — discovery artifacts rather than API operations.
+	InSpec bool
+}
+
+// routes returns every endpoint this server exposes, in registration order.
+func (s *Server) routes() []route {
+	rs := make([]route, 0, 16)
+	add := func(method, path string, h http.Handler, inSpec bool) {
+		rs = append(rs, route{Method: method, Path: path, handler: h, InSpec: inSpec})
+	}
 
 	if s.ingestor != nil {
-		mux.HandleFunc("POST /api/v1/ingest", s.requireIngestKey(s.ingestor.Handler()))
-		mux.HandleFunc("POST /api/v1/ingest/raw", s.requireIngestKey(s.ingestor.RawHandler()))
+		add("POST", "/api/v1/ingest", s.requireIngestKey(s.ingestor.Handler()), true)
+		add("POST", "/api/v1/ingest/raw", s.requireIngestKey(s.ingestor.RawHandler()), true)
 	}
-	mux.HandleFunc("GET /api/v1/search", s.requireAdmin(s.handleSearch))
-	mux.HandleFunc("GET /api/v1/search/stats", s.requireAdmin(s.handleStats))
-	mux.HandleFunc("GET /api/v1/export", s.requireAdmin(s.handleExport))
-	mux.HandleFunc("GET /api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now)))
-	mux.HandleFunc("GET /api/v1/healthz", s.handleHealth)
-	mux.HandleFunc("GET /api/v1/readyz", s.handleReady)
+	add("GET", "/api/v1/search", s.requireAdmin(s.handleSearch), true)
+	add("GET", "/api/v1/search/stats", s.requireAdmin(s.handleStats), true)
+	add("GET", "/api/v1/export", s.requireAdmin(s.handleExport), true)
+	add("GET", "/api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now, s.closing)), true)
+	add("GET", "/api/v1/healthz", http.HandlerFunc(s.handleHealth), true)
+	add("GET", "/api/v1/readyz", http.HandlerFunc(s.handleReady), true)
+	add("GET", "/api/v1/status", s.requireAdmin(s.handleStatus), true)
+	add("GET", "/api/v1/config", s.requireAdmin(s.handleConfigGet), true)
+	add("PUT", "/api/v1/config", s.requireAdmin(s.handleConfigPut), true)
+
 	metricsHandler := http.Handler(http.HandlerFunc(s.handleMetrics))
 	if !s.cfg.MetricsPublic {
 		metricsHandler = loopbackOnly(metricsHandler)
 	}
-	mux.Handle("GET /metrics", metricsHandler)
-	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
-	mux.HandleFunc("GET /docs", s.handleDocs)
-	mux.HandleFunc("GET /api/v1/config", s.requireAdmin(s.handleConfigGet))
-	mux.HandleFunc("PUT /api/v1/config", s.requireAdmin(s.handleConfigPut))
+	add("GET", "/metrics", metricsHandler, true)
 
+	add("GET", "/openapi.json", http.HandlerFunc(s.handleOpenAPI), false)
+	add("GET", "/docs", http.HandlerFunc(s.handleDocs), false)
+	add("GET", "/docs.css", http.HandlerFunc(s.handleDocsCSS), false)
+	add("GET", "/docs.js", http.HandlerFunc(s.handleDocsJS), false)
+	return rs
+}
+
+// Handler returns the fully wired HTTP handler with middleware applied.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	for _, rt := range s.routes() {
+		mux.Handle(rt.Method+" "+rt.Path, rt.handler)
+	}
 	if s.ui != nil {
 		mux.Handle("/", http.FileServerFS(s.ui))
 	}
 
-	return requestIDMiddleware(securityHeaders(recoverMiddleware(s.logger, s.metricsMiddleware(logMiddleware(s.logger, mux)))))
+	// Ordering matters: recovery sits innermost so the metrics and access-log
+	// layers observe the 500 it writes (and still see a request that aborts the
+	// connection, which recovery re-panics).
+	return requestIDMiddleware(
+		s.securityHeaders(
+			logMiddleware(s.logger,
+				s.metricsMiddleware(
+					recoverMiddleware(s.logger, mux)))))
 }

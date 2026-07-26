@@ -534,14 +534,64 @@ func TestOpenAPIAndDocs(t *testing.T) {
 
 	drr := httptest.NewRecorder()
 	h.ServeHTTP(drr, httptest.NewRequest(http.MethodGet, "/docs", nil))
-	if drr.Code != http.StatusOK || !strings.Contains(drr.Body.String(), "redoc") {
-		t.Fatalf("/docs status=%d body lacks redoc", drr.Code)
+	if drr.Code != http.StatusOK {
+		t.Fatalf("/docs status = %d", drr.Code)
 	}
-	if got := drr.Header().Get("Content-Security-Policy"); got != docsContentSecurityPolicy {
-		t.Fatalf("/docs CSP = %q, want %q", got, docsContentSecurityPolicy)
+	body := drr.Body.String()
+	// The viewer must stay self-hosted: no third-party origin, and no inline
+	// script/style, so it runs under the same strict CSP as the rest of the UI.
+	if strings.Contains(body, "//cdn.") || strings.Contains(body, "http://") || strings.Contains(body, "https://") {
+		t.Fatalf("/docs references an external origin:\n%s", body)
 	}
-	if strings.Contains(drr.Body.String(), "<style") {
-		t.Fatal("/docs contains an unnecessary inline style block")
+	if strings.Contains(body, "<style") || strings.Contains(body, "<script>") {
+		t.Fatalf("/docs contains an inline script or style block:\n%s", body)
+	}
+	if got := drr.Header().Get("Content-Security-Policy"); got != contentSecurityPolicy {
+		t.Fatalf("/docs CSP = %q, want the default strict policy %q", got, contentSecurityPolicy)
+	}
+	for _, asset := range []string{"/docs.css", "/docs.js"} {
+		arr := httptest.NewRecorder()
+		h.ServeHTTP(arr, httptest.NewRequest(http.MethodGet, asset, nil))
+		if arr.Code != http.StatusOK || arr.Body.Len() == 0 {
+			t.Fatalf("%s status = %d, len = %d", asset, arr.Code, arr.Body.Len())
+		}
+	}
+}
+
+// TestOpenAPICoversEveryRoute keeps the published contract honest: every route
+// flagged InSpec must appear in openapi.json with that method, and the spec
+// must not document endpoints the server does not serve.
+func TestOpenAPICoversEveryRoute(t *testing.T) {
+	srv, _ := newServer(t, config.Default())
+
+	var spec struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(openapiSpec, &spec); err != nil {
+		t.Fatalf("openapi.json: %v", err)
+	}
+
+	served := map[string]bool{}
+	for _, rt := range srv.routes() {
+		if !rt.InSpec {
+			continue
+		}
+		served[strings.ToLower(rt.Method)+" "+rt.Path] = true
+		ops, ok := spec.Paths[rt.Path]
+		if !ok {
+			t.Errorf("route %s %s is missing from openapi.json", rt.Method, rt.Path)
+			continue
+		}
+		if _, ok := ops[strings.ToLower(rt.Method)]; !ok {
+			t.Errorf("openapi.json documents %s but not its %s operation", rt.Path, rt.Method)
+		}
+	}
+	for path, ops := range spec.Paths {
+		for method := range ops {
+			if !served[method+" "+path] {
+				t.Errorf("openapi.json documents %s %s, which the server does not serve", strings.ToUpper(method), path)
+			}
+		}
 	}
 }
 
@@ -554,5 +604,39 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	if strings.Contains(rr.Body.String(), "ingest") || strings.Contains(rr.Body.String(), "subscribers") {
 		t.Fatalf("health endpoint leaked operational details: %s", rr.Body.String())
+	}
+}
+
+// TestHSTSIsOptIn: Strict-Transport-Security is sticky in browsers for a year,
+// so enabling it by default would pin the origin to HTTPS and lock out a
+// plain-HTTP fallback. It ships off, and only applies when TLS is configured.
+func TestHSTSIsOptIn(t *testing.T) {
+	header := func(cfg config.Config) string {
+		srv, _ := newServer(t, cfg)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil))
+		return rr.Header().Get("Strict-Transport-Security")
+	}
+
+	if got := header(config.Default()); got != "" {
+		t.Errorf("HSTS sent by default: %q", got)
+	}
+
+	tlsOnly := config.Default()
+	tlsOnly.TLSCert, tlsOnly.TLSKey = "cert.pem", "key.pem"
+	if got := header(tlsOnly); got != "" {
+		t.Errorf("HSTS sent with TLS but without opting in: %q", got)
+	}
+
+	optedInNoTLS := config.Default()
+	optedInNoTLS.HSTS = true
+	if got := header(optedInNoTLS); got != "" {
+		t.Errorf("HSTS sent over plain HTTP, which would strand the origin: %q", got)
+	}
+
+	both := config.Default()
+	both.TLSCert, both.TLSKey, both.HSTS = "cert.pem", "key.pem", true
+	if got := header(both); got != hstsValue {
+		t.Errorf("HSTS with TLS + opt-in = %q, want %q", got, hstsValue)
 	}
 }

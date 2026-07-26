@@ -4,15 +4,23 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
 	"github.com/pod32g/omni-logging/internal/model"
 )
 
-// maxBodyBytes caps a single ingest request to protect memory.
-const maxBodyBytes = 32 << 20 // 32 MiB
+// defaultMaxBodyBytes caps a single ingest request to protect memory. Override
+// per-Ingestor with Options.MaxBodyBytes.
+const defaultMaxBodyBytes = 32 << 20 // 32 MiB
+
+// readBufBytes is the streaming read buffer, and therefore the largest single
+// NDJSON line or raw log line accepted. Bodies are consumed incrementally, so
+// request memory is bounded by this rather than by the whole-body cap.
+const readBufBytes = 1 << 20 // 1 MiB
 
 // recordError describes why a single record in a batch was rejected.
 type recordError struct {
@@ -27,21 +35,36 @@ type ingestResponse struct {
 	Errors   []recordError `json:"errors,omitempty"`
 }
 
+// countingReader tallies the bytes actually read. Quota accounting uses this
+// instead of Content-Length, which is -1 for a chunked request and would let
+// chunked uploads accumulate no usage at all.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // Handler accepts structured logs as either a JSON array of objects or NDJSON
 // (one JSON object per line). Malformed records are reported per-record;
 // well-formed records are enqueued. If the buffer fills mid-batch, the response
 // is 429 and the overflow is reported as rejected.
+//
+// The body is consumed as a stream rather than buffered whole: a 32 MiB cap
+// per request times the number of concurrent producers is a lot of live heap
+// for a server whose job is to stay up under load.
 func (i *Ingestor) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := i.admit(w, r)
 		if !ok {
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-		if err != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-			return
-		}
+		counter := &countingReader{r: http.MaxBytesReader(w, r.Body, i.opts.MaxBodyBytes)}
+		br := bufio.NewReaderSize(counter, readBufBytes)
 		now := i.opts.Now()
 
 		var resp ingestResponse
@@ -67,33 +90,53 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 			resp.Accepted++
 		}
 
-		trimmed := bytes.TrimSpace(body)
-		if len(trimmed) > 0 && trimmed[0] == '[' {
-			// JSON array form.
-			var arr []json.RawMessage
-			if err := json.Unmarshal(trimmed, &arr); err != nil {
-				http.Error(w, "invalid JSON array: "+err.Error(), http.StatusBadRequest)
+		first, err := peekFirstNonSpace(br)
+		if err != nil && err != io.EOF {
+			i.recordUsage(key, resp.Accepted, counter.n)
+			http.Error(w, "error reading body: "+err.Error(), readErrStatus(err))
+			return
+		}
+
+		if first == '[' {
+			// JSON array form, decoded element by element.
+			dec := json.NewDecoder(br)
+			if _, terr := dec.Token(); terr != nil { // consumes '['
+				i.recordUsage(key, resp.Accepted, counter.n)
+				http.Error(w, "invalid JSON array: "+terr.Error(), readErrStatus(terr))
 				return
 			}
-			for idx, raw := range arr {
+			idx := 0
+			for dec.More() {
+				var raw json.RawMessage
+				if derr := dec.Decode(&raw); derr != nil {
+					// Records before the syntax error were already accepted, so
+					// report the partial outcome rather than implying none were.
+					resp.Rejected++
+					resp.Errors = append(resp.Errors, recordError{Index: idx, Error: "invalid JSON array: " + derr.Error()})
+					i.recordUsage(key, resp.Accepted, counter.n)
+					writeJSON(w, http.StatusBadRequest, resp)
+					return
+				}
 				emit(idx, raw)
+				idx++
 			}
 		} else {
 			// NDJSON form (also handles a single object).
-			scanner := bufio.NewScanner(bytes.NewReader(body))
-			scanner.Buffer(make([]byte, 0, 64*1024), maxBodyBytes)
+			scanner := bufio.NewScanner(br)
+			scanner.Buffer(make([]byte, 0, 64*1024), readBufBytes)
 			idx := 0
 			for scanner.Scan() {
 				emit(idx, scanner.Bytes())
 				idx++
 			}
-			if err := scanner.Err(); err != nil {
-				http.Error(w, "error reading body: "+err.Error(), http.StatusBadRequest)
+			if serr := scanner.Err(); serr != nil {
+				i.recordUsage(key, resp.Accepted, counter.n)
+				http.Error(w, "error reading body: "+serr.Error(), readErrStatus(serr))
 				return
 			}
 		}
 
-		i.recordUsage(key, resp.Accepted, int64(len(body)))
+		i.recordUsage(key, resp.Accepted, counter.n)
 		status := http.StatusOK
 		if overflow {
 			status = http.StatusTooManyRequests
@@ -116,9 +159,9 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 		level := model.ParseLevel(firstNonEmpty(r.URL.Query().Get("level"), "info"))
 		now := i.opts.Now()
 
-		body := http.MaxBytesReader(w, r.Body, maxBodyBytes)
-		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 0, 64*1024), maxBodyBytes)
+		counter := &countingReader{r: http.MaxBytesReader(w, r.Body, i.opts.MaxBodyBytes)}
+		scanner := bufio.NewScanner(counter)
+		scanner.Buffer(make([]byte, 0, 64*1024), readBufBytes)
 
 		var resp ingestResponse
 		overflow := false
@@ -140,21 +183,44 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 			resp.Accepted++
 		}
 		if err := scanner.Err(); err != nil {
-			http.Error(w, "error reading body: "+err.Error(), http.StatusBadRequest)
+			i.recordUsage(key, resp.Accepted, counter.n)
+			http.Error(w, "error reading body: "+err.Error(), readErrStatus(err))
 			return
 		}
 
-		cl := r.ContentLength
-		if cl < 0 {
-			cl = 0
-		}
-		i.recordUsage(key, resp.Accepted, cl)
+		i.recordUsage(key, resp.Accepted, counter.n)
 		status := http.StatusOK
 		if overflow {
 			status = http.StatusTooManyRequests
 		}
 		writeJSON(w, status, resp)
 	}
+}
+
+// peekFirstNonSpace discards leading whitespace and returns the first
+// meaningful byte without consuming it.
+func peekFirstNonSpace(br *bufio.Reader) (byte, error) {
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		return b, br.UnreadByte()
+	}
+}
+
+// readErrStatus maps a body-read failure to a status code. Both the whole-body
+// cap and the per-line cap are size problems and report 413; anything else is a
+// malformed request.
+func readErrStatus(err error) int {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) || errors.Is(err, bufio.ErrTooLong) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -172,8 +238,11 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// clientIP returns the peer address without its port. net.SplitHostPort is
+// required rather than cutting at the first ':' — an IPv6 RemoteAddr like
+// "[::1]:54321" would otherwise yield "[".
 func clientIP(r *http.Request) string {
-	if host, _, found := strings.Cut(r.RemoteAddr, ":"); found {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}
 	return r.RemoteAddr

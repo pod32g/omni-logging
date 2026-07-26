@@ -77,9 +77,24 @@ func cachedRegexp(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
+// maxReadConns bounds the read pool. WAL allows many concurrent readers
+// alongside the single writer, so reads never need to queue behind an append.
+const maxReadConns = 4
+
 // DB is a SQLite-backed store.Store.
+//
+// It keeps two pools over the same file. Writes (Append, Purge, migrations,
+// backup) go through db, a deliberately single-connection pool: serializing
+// them avoids "database is locked" churn and keeps an in-memory database alive
+// for the process lifetime. Reads (Search, Stats, Stream) go through ro, a
+// small multi-connection pool, so a long export streaming to a slow client
+// cannot hold the write connection hostage and stall ingestion.
+//
+// For ":memory:" the two are the same pool — a second connection would open a
+// different, empty database.
 type DB struct {
-	db *sql.DB
+	db *sql.DB // writes + DDL; exactly one connection
+	ro *sql.DB // reads; up to maxReadConns connections (== db for :memory:)
 }
 
 // Open opens (creating if needed) a SQLite database at path and runs the
@@ -96,9 +111,6 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// A single connection avoids "database is locked" churn and keeps an
-	// in-memory database alive for the process lifetime. This is plenty for a
-	// single-node logging server; reads still proceed concurrently via WAL.
 	sqldb.SetMaxOpenConns(1)
 	sqldb.SetMaxIdleConns(1)
 	sqldb.SetConnMaxLifetime(0)
@@ -108,11 +120,44 @@ func Open(path string) (*DB, error) {
 		sqldb.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &DB{db: sqldb}, nil
+
+	d := &DB{db: sqldb, ro: sqldb}
+	if path != ":memory:" {
+		// Opened after migrate so the file and its schema already exist. Reads
+		// use the same read/write DSN (a read-only WAL connection needs a
+		// writable -shm, which is fragile on some filesystems); query_only is
+		// what actually keeps this pool from writing.
+		roDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=query_only(1)&_pragma=foreign_keys(1)", path)
+		rodb, oerr := sql.Open("sqlite", roDSN)
+		if oerr != nil {
+			sqldb.Close()
+			return nil, fmt.Errorf("open sqlite (read pool): %w", oerr)
+		}
+		rodb.SetMaxOpenConns(maxReadConns)
+		rodb.SetMaxIdleConns(maxReadConns)
+		rodb.SetConnMaxLifetime(0)
+		rodb.SetConnMaxIdleTime(0)
+		if perr := rodb.PingContext(context.Background()); perr != nil {
+			rodb.Close()
+			sqldb.Close()
+			return nil, fmt.Errorf("open sqlite (read pool): %w", perr)
+		}
+		d.ro = rodb
+	}
+	return d, nil
 }
 
-// Close closes the underlying database.
-func (d *DB) Close() error { return d.db.Close() }
+// Close closes the underlying database(s).
+func (d *DB) Close() error {
+	var firstErr error
+	if d.ro != nil && d.ro != d.db {
+		firstErr = d.ro.Close()
+	}
+	if err := d.db.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
 
 // Ping verifies the database connection is alive. It powers the readiness probe.
 func (d *DB) Ping(ctx context.Context) error { return d.db.PingContext(ctx) }
@@ -215,8 +260,12 @@ func (d *DB) Purge(ctx context.Context, olderThan time.Time) (int64, error) {
 	defer tx.Rollback()
 
 	cutoff := olderThan.UnixNano()
+	// Delete by rowid, not by the UNINDEXED id column: FTS5 can address a row
+	// directly by rowid, whereas matching on id forces a scan of the whole
+	// index on every retention pass. Append keys FTS rows by logs.rowid, and
+	// migration 2 guarantees that alignment for older rows.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM logs_fts WHERE id IN (SELECT id FROM logs WHERE ts < ?)`, cutoff); err != nil {
+		`DELETE FROM logs_fts WHERE rowid IN (SELECT rowid FROM logs WHERE ts < ?)`, cutoff); err != nil {
 		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM logs WHERE ts < ?`, cutoff)

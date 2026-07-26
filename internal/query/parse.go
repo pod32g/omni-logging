@@ -198,6 +198,12 @@ func tokenize(expr string) ([]token, error) {
 	return tokens, nil
 }
 
+// MaxRelative bounds a relative window. time.Duration is a 64-bit nanosecond
+// count that tops out near 292 years, so an unchecked "99999999999d" silently
+// overflows into a negative duration and yields a nonsense time bound. A
+// century is far past any real retention window.
+const MaxRelative = 100 * 365 * 24 * time.Hour
+
 // ParseRelative parses a relative duration like "15m", "2h", "7d", "30s".
 func ParseRelative(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
@@ -210,18 +216,26 @@ func ParseRelative(s string) (time.Duration, error) {
 	if err != nil || n < 0 {
 		return 0, fmt.Errorf("invalid relative time %q", s)
 	}
+
+	var scale time.Duration
 	switch unit {
 	case 's':
-		return time.Duration(n) * time.Second, nil
+		scale = time.Second
 	case 'm':
-		return time.Duration(n) * time.Minute, nil
+		scale = time.Minute
 	case 'h':
-		return time.Duration(n) * time.Hour, nil
+		scale = time.Hour
 	case 'd':
-		return time.Duration(n) * 24 * time.Hour, nil
+		scale = 24 * time.Hour
 	default:
 		return 0, fmt.Errorf("invalid relative time unit in %q (use s/m/h/d)", s)
 	}
+
+	// Compare before multiplying so the check itself cannot overflow.
+	if int64(n) > int64(MaxRelative/scale) {
+		return 0, fmt.Errorf("relative time %q is too large (max %s)", s, MaxRelative)
+	}
+	return time.Duration(n) * scale, nil
 }
 
 // ParseTime parses an absolute time bound: RFC3339 or unix seconds.

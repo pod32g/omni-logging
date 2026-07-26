@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/pod32g/omni-logging/internal/model"
 )
@@ -197,19 +198,78 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 
 const maxRegexCache = 1024
 
-// termMatches does a case-insensitive substring search across the searchable
-// text of an event: message, raw, service, source, and attribute values.
+// termMatches reports whether a free-text term matches an event, mirroring the
+// store's FTS5 execution rather than doing a naive substring search.
+//
+// The store wraps each term as a quoted FTS5 string, which matches a contiguous
+// run of whole tokens. Substring matching would disagree with it in both
+// directions — searching "err" would stream every "error" event into live tail
+// while returning nothing from search — so we tokenize the same way FTS5's
+// default tokenizer does (runs of letters and digits, case-folded) and look for
+// the term's tokens as a contiguous subsequence.
 func termMatches(e model.LogEvent, term string) bool {
-	needle := strings.ToLower(term)
-	if strings.Contains(strings.ToLower(e.Message), needle) ||
-		strings.Contains(strings.ToLower(e.Raw), needle) ||
-		strings.Contains(strings.ToLower(e.Service), needle) ||
-		strings.Contains(strings.ToLower(e.Source), needle) {
-		return true
+	want := ftsTokenize(term)
+	if len(want) == 0 {
+		return false // FTS5 matches nothing for a term with no tokens
 	}
+	return containsTokens(ftsTokens(e), want)
+}
+
+// ftsTokens builds the token stream for the event's searchable text, in the
+// same order the store concatenates it (see sqlite.ftsText): message, raw,
+// service, source, then every attribute key and value.
+func ftsTokens(e model.LogEvent) []string {
+	toks := ftsTokenize(e.Message)
+	toks = append(toks, ftsTokenize(e.Raw)...)
+	toks = append(toks, ftsTokenize(e.Service)...)
+	toks = append(toks, ftsTokenize(e.Source)...)
 	for k, v := range e.Attributes {
-		if strings.Contains(strings.ToLower(k), needle) ||
-			strings.Contains(strings.ToLower(stringify(v)), needle) {
+		toks = append(toks, ftsTokenize(k)...)
+		toks = append(toks, ftsTokenize(stringify(v))...)
+	}
+	return toks
+}
+
+// ftsTokenize splits text into lowercase alphanumeric tokens, approximating FTS5's
+// default unicode61 tokenizer (which breaks on anything that is not a letter or
+// a digit).
+func ftsTokenize(s string) []string {
+	var (
+		toks []string
+		b    strings.Builder
+	)
+	flush := func() {
+		if b.Len() > 0 {
+			toks = append(toks, b.String())
+			b.Reset()
+		}
+	}
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		flush()
+	}
+	flush()
+	return toks
+}
+
+// containsTokens reports whether want appears as a contiguous run inside have,
+// which is how FTS5 evaluates a quoted multi-word phrase.
+func containsTokens(have, want []string) bool {
+	if len(want) > len(have) {
+		return false
+	}
+	for i := 0; i+len(want) <= len(have); i++ {
+		match := true
+		for j, wt := range want {
+			if have[i+j] != wt {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
