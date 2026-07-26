@@ -35,6 +35,9 @@ type Deps struct {
 	// streams watch it so they end promptly instead of holding graceful
 	// shutdown open for its full timeout. nil means "never closes".
 	Closing <-chan struct{}
+	// Alerts persists alert rules and channels. nil disables the alerting
+	// endpoints entirely rather than serving ones that cannot store anything.
+	Alerts AlertStore
 }
 
 // Server holds API dependencies and builds the HTTP handler.
@@ -49,6 +52,7 @@ type Server struct {
 	settings *settings.Manager
 	version  string
 	closing  <-chan struct{}
+	alerts   AlertStore
 
 	// exportSlots bounds concurrent exports so a handful of long downloads
 	// cannot occupy every read connection and starve interactive searches.
@@ -85,6 +89,7 @@ func New(d Deps) *Server {
 		settings:    d.Settings,
 		version:     d.Version,
 		closing:     d.Closing,
+		alerts:      d.Alerts,
 		metrics:     d.Metrics,
 		exportSlots: make(chan struct{}, maxConcurrentExports),
 	}
@@ -177,6 +182,18 @@ func (s *Server) routes() []route {
 	add("GET", "/api/v1/status", s.requireAdmin(s.handleStatus), true)
 	add("GET", "/api/v1/config", s.requireAdmin(s.handleConfigGet), true)
 	add("PUT", "/api/v1/config", s.requireAdmin(s.handleConfigPut), true)
+
+	if s.alerts != nil {
+		add("GET", "/api/v1/alerts", s.requireAdmin(s.handleAlertsList), true)
+		add("POST", "/api/v1/alerts", s.requireAdmin(s.handleAlertCreate), true)
+		add("PUT", "/api/v1/alerts/{id}", s.requireAdmin(s.handleAlertUpdate), true)
+		add("DELETE", "/api/v1/alerts/{id}", s.requireAdmin(s.handleAlertDelete), true)
+		add("POST", "/api/v1/alerts/{id}/test", s.requireAdmin(s.handleAlertTest), true)
+		add("GET", "/api/v1/alerts/channels", s.requireAdmin(s.handleChannelsList), true)
+		add("POST", "/api/v1/alerts/channels", s.requireAdmin(s.handleChannelCreate), true)
+		add("DELETE", "/api/v1/alerts/channels/{id}", s.requireAdmin(s.handleChannelDelete), true)
+		add("POST", "/api/v1/alerts/channels/{id}/test", s.requireAdmin(s.handleChannelTest), true)
+	}
 
 	metricsHandler := http.Handler(http.HandlerFunc(s.handleMetrics))
 	if !s.cfg.MetricsPublic {

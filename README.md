@@ -12,6 +12,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — a piped analytics stage (`| stats count by service`, `timechart`, `top`, `rare`), plus the counts-over-time histogram and field facets.
+- **Alerting** — scheduled rules over any search or aggregation, with threshold conditions and webhook/Slack notifications on state transitions.
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
@@ -126,6 +127,7 @@ Single Go binary, packages under `internal/`:
 | `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
 | `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
 | `forward` | File-tailing forwarder client |
+| `alert` | Rule evaluation, scheduling and notification delivery |
 | `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
 
 The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
@@ -194,6 +196,50 @@ omnilog healthcheck --url http://localhost:8080/api/v1/healthz  # container HEAL
 Run locally with Compose: `docker compose up --build -d` (UI on `:8080`,
 data in the `omnilog-data` volume). Set `OMNILOG_ADMIN_TOKEN` / `OMNILOG_INGEST_KEYS`
 in a `.env` file to enable auth.
+
+## Alerting
+
+An alert rule is a query plus a window plus a threshold — the query is any
+search expression, including an aggregation stage, so anything you can search
+for you can alert on.
+
+```sh
+# a channel to notify
+curl -XPOST localhost:8080/api/v1/alerts/channels -H 'Content-Type: application/json' \
+  -d '{"name":"ops","type":"slack","url":"https://hooks.slack.com/services/..."}'
+
+# fire when any service logs more than 50 errors in 5 minutes
+curl -XPOST localhost:8080/api/v1/alerts -H 'Content-Type: application/json' -d '{
+  "name": "error spike",
+  "query": "level=error | stats count by service",
+  "window_seconds": 300,
+  "interval_seconds": 60,
+  "condition": {"op": "gt", "value": 50},
+  "channels": ["<channel-id>"],
+  "enabled": true
+}'
+
+# see what it would do right now, without firing or changing its state
+curl -XPOST localhost:8080/api/v1/alerts/<rule-id>/test
+```
+
+- **Conditions** — `gt`, `gte`, `lt`, `lte`, `eq`, `ne` against a threshold.
+  A plain query compares the number of matching events; an aggregating query
+  compares its first measure and reports **which groups** breached, so the
+  notification names the service rather than only the symptom.
+- **Notifications fire on transitions**, not on every evaluation: a rule that
+  stays broken for an hour sends one firing message and one resolved message.
+- **A failed evaluation goes to `unknown`**, never to `ok` — "we could not tell"
+  is not the same as "fine", and it does not send a resolved notification.
+- **Dead-man's switch** — because an empty aggregate compares as zero,
+  `service=heartbeat | stats count` with `lt 1` alerts when a service goes quiet.
+- **Channels** are `webhook` (receives the full JSON payload) or `slack`
+  (receives `{"text": ...}`). Redirects are deliberately not followed, so a
+  payload cannot be diverted to a host you did not configure.
+
+> Alert channels make the server issue outbound HTTP requests to URLs you
+> supply. The endpoints are behind the admin token for that reason; treat the
+> ability to create a channel as equivalent to outbound request access.
 
 ### Syslog collector
 

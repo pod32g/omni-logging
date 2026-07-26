@@ -74,7 +74,7 @@ func newServer(t *testing.T, cfg config.Config) (*Server, *sqlite.DB) {
 	ing.Start()
 	t.Cleanup(func() { ing.Stop() })
 
-	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub})
+	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub, Alerts: db})
 	return srv, db
 }
 

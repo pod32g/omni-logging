@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/pod32g/omni-logging/internal/admission"
+	"github.com/pod32g/omni-logging/internal/alert"
 	"github.com/pod32g/omni-logging/internal/api"
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/forward"
@@ -268,6 +269,17 @@ func runServe(args []string, logger *slog.Logger) error {
 	// of keeping graceful shutdown busy until its deadline.
 	closing := make(chan struct{})
 
+	// Alert rules evaluate on a schedule and notify on state transitions. The
+	// evaluator reads through the store's read pool, so a rule cannot slow
+	// ingestion however broad its query.
+	alertSched := alert.NewScheduler(alert.SchedulerOptions{
+		Store:  store,
+		Runner: store,
+		Logger: logger,
+	})
+	alertSched.Start()
+	defer alertSched.Stop()
+
 	srv := api.New(api.Deps{
 		Config:   cfg,
 		Store:    store,
@@ -278,6 +290,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		Version:  version,
 		Settings: mgr,
 		Closing:  closing,
+		Alerts:   store,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

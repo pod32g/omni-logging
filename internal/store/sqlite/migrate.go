@@ -64,6 +64,38 @@ var migrations = []migration{
 			`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		},
 	},
+	{
+		version: 4,
+		name:    "alert rules and channels",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS alert_rules (
+				id           TEXT PRIMARY KEY,
+				name         TEXT NOT NULL,
+				query        TEXT NOT NULL,
+				window_sec   INTEGER NOT NULL,
+				interval_sec INTEGER NOT NULL,
+				cond_op      TEXT NOT NULL,
+				cond_value   REAL NOT NULL,
+				channels     TEXT NOT NULL DEFAULT '[]',
+				enabled      INTEGER NOT NULL DEFAULT 1,
+				state        TEXT NOT NULL DEFAULT 'unknown',
+				state_since  INTEGER NOT NULL DEFAULT 0,
+				last_eval    INTEGER NOT NULL DEFAULT 0,
+				last_value   REAL NOT NULL DEFAULT 0,
+				last_error   TEXT NOT NULL DEFAULT '',
+				created_at   INTEGER NOT NULL,
+				updated_at   INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled)`,
+			`CREATE TABLE IF NOT EXISTS alert_channels (
+				id         TEXT PRIMARY KEY,
+				name       TEXT NOT NULL,
+				type       TEXT NOT NULL,
+				url        TEXT NOT NULL,
+				created_at INTEGER NOT NULL
+			)`,
+		},
+	},
 }
 
 // rebuildFTSRowids re-creates every full-text row keyed by its logs.rowid,
