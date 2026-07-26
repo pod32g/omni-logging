@@ -422,3 +422,49 @@ table.agg td.num .barfill {
   vertical-align: baseline;
 }
 .agg-note { padding: 0.6rem 0.9rem; }
+
+/* ---- alerts ---- */
+.rules, .chans { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.75rem; }
+
+.rule, .chan {
+  display: flex; align-items: flex-start; gap: 0.75rem;
+  padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-radius: 8px;
+}
+.rule-main, .chan-main { flex: 1; min-width: 0; }
+.rule-name, .chan-name { font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
+.rule-query, .rule-meta, .chan-url {
+  font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+}
+.rule-err { font-size: 0.8rem; color: #dc2626; margin-top: 0.25rem; overflow-wrap: anywhere; }
+.rule-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
+
+/* A rule's state is the first thing to read, so it gets a colour before text. */
+.rule-state { width: 9px; height: 9px; border-radius: 50%; margin-top: 0.45rem; flex-shrink: 0; }
+.rule-state.ok { background: #16a34a; }
+.rule-state.firing { background: #dc2626; box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.18); }
+.rule-state.unknown { background: var(--muted); }
+
+.rule-off {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.05rem 0.4rem; font-weight: 500;
+}
+
+.chan-type {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.15rem 0.4rem; margin-top: 0.15rem; flex-shrink: 0;
+}
+
+.cond-row { display: flex; gap: 0.5rem; align-items: center; }
+.cond-row select { flex: 0 0 5rem; }
+
+/* A selected notification channel, in the rule editor's picker. */
+.chip.is-on { border-color: var(--accent, #2348E0); color: var(--accent, #2348E0); }
+
+pre.dryrun {
+  margin-top: 0.75rem; padding: 0.7rem 0.8rem; border-radius: 8px;
+  background: var(--code-bg, rgba(127,150,245,0.08)); border: 1px solid var(--border);
+  font-size: 0.78rem; overflow-x: auto; max-height: 16rem;
+}

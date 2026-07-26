@@ -65,7 +65,7 @@ function fmtTs(iso) {
 function fmtNum(n) { return (n || 0).toLocaleString("en-US"); }
 
 // ---------- view switching ----------
-const views = { search: $("#view-search"), tail: $("#view-tail"), settings: $("#view-settings") };
+const views = { search: $("#view-search"), tail: $("#view-tail"), alerts: $("#view-alerts"), settings: $("#view-settings") };
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("is-active"));
@@ -74,6 +74,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     Object.entries(views).forEach(([name, elm]) => { elm.hidden = name !== v; });
     if (v === "tail") startTail(); else stopTail();
     if (v === "settings") loadSettings();
+    if (v === "alerts") loadAlerts();
   });
 });
 
@@ -617,3 +618,262 @@ document.querySelectorAll("#theme-seg button").forEach((b) => b.addEventListener
 
 // ---------- boot ----------
 runSearch();
+
+// ---------- ALERTS ----------
+// Rules are edited in a single inline form rather than a modal: the list, the
+// editor and the channel picker all need to be visible at once when you are
+// deciding whether a threshold is sensible.
+let alRules = [];
+let alChannels = [];
+let alEditingID = null;      // null = the editor is creating a new rule
+let alSelectedChannels = new Set();
+
+const AL_OPS = { gt: ">", gte: "≥", lt: "<", lte: "≤", eq: "=", ne: "≠" };
+
+async function loadAlerts() {
+  try {
+    const [rules, chans] = await Promise.all([
+      api("/api/v1/alerts"),
+      api("/api/v1/alerts/channels"),
+    ]);
+    alRules = rules.rules || [];
+    alChannels = chans.channels || [];
+    renderRules();
+    renderChannels();
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error(e);
+  }
+}
+
+function fmtDuration(sec) {
+  if (!sec) return "—";
+  if (sec % 3600 === 0) return sec / 3600 + "h";
+  if (sec % 60 === 0) return sec / 60 + "m";
+  return sec + "s";
+}
+
+function renderRules() {
+  const host = $("#al-rules");
+  host.replaceChildren();
+  if (!alRules.length) {
+    host.appendChild(el("span", "hint", "No alert rules yet."));
+    return;
+  }
+  alRules.forEach((r) => {
+    const row = el("div", "rule");
+
+    const dot = el("span", "rule-state " + (r.state || "unknown"));
+    dot.title = "state: " + (r.state || "unknown");
+    row.appendChild(dot);
+
+    const main = el("div", "rule-main");
+    const title = el("div", "rule-name", r.name);
+    if (!r.enabled) title.appendChild(el("span", "rule-off", "disabled"));
+    main.appendChild(title);
+    main.appendChild(el("div", "rule-query mono", r.query));
+
+    const meta = `${AL_OPS[r.condition.op] || r.condition.op} ${r.condition.value}` +
+      ` · window ${fmtDuration(r.window_seconds)} · every ${fmtDuration(r.interval_seconds)}` +
+      ` · last ${r.last_value ?? 0}`;
+    main.appendChild(el("div", "rule-meta", meta));
+    if (r.last_error) main.appendChild(el("div", "rule-err", r.last_error));
+    row.appendChild(main);
+
+    const actions = el("div", "rule-actions");
+    const edit = el("button", "chip", "Edit");
+    edit.addEventListener("click", () => openRuleEditor(r));
+    const del = el("button", "chip", "Delete");
+    del.addEventListener("click", () => deleteRule(r));
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    row.appendChild(actions);
+
+    host.appendChild(row);
+  });
+}
+
+function renderChannels() {
+  const host = $("#al-chan-list");
+  host.replaceChildren();
+  if (!alChannels.length) {
+    host.appendChild(el("span", "hint", "No channels yet — a rule with no channel changes state silently."));
+  }
+  alChannels.forEach((c) => {
+    const row = el("div", "chan");
+    row.appendChild(el("span", "chan-type", c.type));
+    const main = el("div", "chan-main");
+    main.appendChild(el("div", "chan-name", c.name));
+    main.appendChild(el("div", "chan-url mono", c.url));
+    row.appendChild(main);
+
+    const actions = el("div", "rule-actions");
+    const test = el("button", "chip", "Test");
+    test.addEventListener("click", () => testChannel(c, test));
+    const del = el("button", "chip", "Delete");
+    del.addEventListener("click", () => deleteChannel(c));
+    actions.appendChild(test);
+    actions.appendChild(del);
+    row.appendChild(actions);
+    host.appendChild(row);
+  });
+  renderChannelPicker();
+}
+
+function renderChannelPicker() {
+  const host = $("#al-channels");
+  host.replaceChildren();
+  if (!alChannels.length) {
+    host.appendChild(el("span", "hint", "Add a channel to be notified."));
+    return;
+  }
+  alChannels.forEach((c) => {
+    const chip = el("button", "chip" + (alSelectedChannels.has(c.id) ? " is-on" : ""), c.name);
+    chip.type = "button";
+    chip.addEventListener("click", () => {
+      if (alSelectedChannels.has(c.id)) alSelectedChannels.delete(c.id);
+      else alSelectedChannels.add(c.id);
+      renderChannelPicker();
+    });
+    host.appendChild(chip);
+  });
+}
+
+function openRuleEditor(rule) {
+  alEditingID = rule ? rule.id : null;
+  alSelectedChannels = new Set(rule ? rule.channels || [] : []);
+  $("#al-editor-title").textContent = rule ? "Edit rule" : "New rule";
+  $("#al-name").value = rule ? rule.name : "";
+  $("#al-query").value = rule ? rule.query : "level=error";
+  $("#al-window").value = rule ? rule.window_seconds : 300;
+  $("#al-interval").value = rule ? rule.interval_seconds : 60;
+  $("#al-op").value = rule ? rule.condition.op : "gt";
+  $("#al-value").value = rule ? rule.condition.value : 10;
+  $("#al-enabled").checked = rule ? rule.enabled : true;
+  $("#al-editor-msg").textContent = "";
+  $("#al-dryrun-out").hidden = true;
+  $("#al-editor").hidden = false;
+  renderChannelPicker();
+  $("#al-name").focus();
+}
+
+function ruleFromEditor() {
+  return {
+    name: $("#al-name").value.trim(),
+    query: $("#al-query").value.trim(),
+    window_seconds: parseInt($("#al-window").value, 10) || 0,
+    interval_seconds: parseInt($("#al-interval").value, 10) || 0,
+    condition: { op: $("#al-op").value, value: parseFloat($("#al-value").value) || 0 },
+    channels: [...alSelectedChannels],
+    enabled: $("#al-enabled").checked,
+  };
+}
+
+async function saveRule() {
+  const msg = $("#al-editor-msg");
+  const body = ruleFromEditor();
+  const method = alEditingID ? "PUT" : "POST";
+  const path = alEditingID ? "/api/v1/alerts/" + alEditingID : "/api/v1/alerts";
+  try {
+    const res = await apiSend(method, path, body);
+    if (!res.ok) {
+      // The server validates the query too, so this is where a bad expression
+      // surfaces — at save time rather than silently every interval.
+      msg.textContent = (await res.text()).trim();
+      msg.className = "cfg-msg err";
+      return;
+    }
+    msg.textContent = "Saved.";
+    msg.className = "cfg-msg ok";
+    $("#al-editor").hidden = true;
+    alEditingID = null;
+    await loadAlerts();
+  } catch (e) {
+    if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "cfg-msg err"; }
+  }
+}
+
+async function dryRunRule() {
+  const out = $("#al-dryrun-out");
+  const msg = $("#al-editor-msg");
+  if (!alEditingID) {
+    msg.textContent = "Save the rule first, then test it.";
+    msg.className = "cfg-msg err";
+    return;
+  }
+  try {
+    const res = await apiSend("POST", "/api/v1/alerts/" + alEditingID + "/test");
+    const body = await res.json();
+    out.textContent = JSON.stringify(body, null, 2);
+    out.hidden = false;
+    msg.textContent = body.firing ? "Would fire now." : "Would not fire now.";
+    msg.className = "cfg-msg " + (body.firing ? "err" : "ok");
+  } catch (e) {
+    if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "cfg-msg err"; }
+  }
+}
+
+async function deleteRule(rule) {
+  try {
+    await apiSend("DELETE", "/api/v1/alerts/" + rule.id);
+    if (alEditingID === rule.id) { $("#al-editor").hidden = true; alEditingID = null; }
+    await loadAlerts();
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error(e);
+  }
+}
+
+async function addChannel() {
+  const msg = $("#al-chan-msg");
+  const body = {
+    name: $("#al-chan-name").value.trim(),
+    type: $("#al-chan-type").value,
+    url: $("#al-chan-url").value.trim(),
+  };
+  try {
+    const res = await apiSend("POST", "/api/v1/alerts/channels", body);
+    if (!res.ok) {
+      msg.textContent = (await res.text()).trim();
+      msg.className = "cfg-msg err";
+      return;
+    }
+    $("#al-chan-name").value = "";
+    $("#al-chan-url").value = "";
+    msg.textContent = "Added.";
+    msg.className = "cfg-msg ok";
+    await loadAlerts();
+  } catch (e) {
+    if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "cfg-msg err"; }
+  }
+}
+
+async function testChannel(chan, btn) {
+  const msg = $("#al-chan-msg");
+  const original = btn.textContent;
+  btn.textContent = "Sending…";
+  try {
+    const res = await apiSend("POST", "/api/v1/alerts/channels/" + chan.id + "/test");
+    const body = await res.json();
+    msg.textContent = body.ok ? `Delivered to ${chan.name}.` : `Failed: ${body.error}`;
+    msg.className = "cfg-msg " + (body.ok ? "ok" : "err");
+  } catch (e) {
+    if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "cfg-msg err"; }
+  } finally {
+    btn.textContent = original;
+  }
+}
+
+async function deleteChannel(chan) {
+  try {
+    await apiSend("DELETE", "/api/v1/alerts/channels/" + chan.id);
+    alSelectedChannels.delete(chan.id);
+    await loadAlerts();
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error(e);
+  }
+}
+
+$("#al-new").addEventListener("click", () => openRuleEditor(null));
+$("#al-cancel").addEventListener("click", () => { $("#al-editor").hidden = true; alEditingID = null; });
+$("#al-save").addEventListener("click", saveRule);
+$("#al-dryrun").addEventListener("click", dryRunRule);
+$("#al-chan-add").addEventListener("click", addChannel);

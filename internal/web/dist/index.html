@@ -18,6 +18,7 @@
     <nav class="nav">
       <button class="nav-item is-active" data-view="search">Search</button>
       <button class="nav-item" data-view="tail">Live tail</button>
+      <button class="nav-item" data-view="alerts">Alerts</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
     <div class="account">
@@ -148,6 +149,71 @@
     </div>
     <div class="rows" id="stream-rows"></div>
     <div class="empty" id="tail-empty">No matching events yet — recent history appears here, then new events stream in live.</div>
+  </section>
+
+  <!-- ALERTS VIEW -->
+  <section class="view" id="view-alerts" hidden>
+    <div class="settings">
+      <div class="settings-col">
+        <div class="card">
+          <h3>Alert rules</h3>
+          <p class="hint">A rule is a query, a window and a threshold. Any search works, including an aggregation like <code>level=error | stats count by service</code>. Notifications are sent when a rule changes state, not on every check.</p>
+          <div class="rules" id="al-rules"></div>
+          <div class="set-actions">
+            <button class="chip" id="al-new">New rule</button>
+            <span class="cfg-msg" id="al-msg"></span>
+          </div>
+        </div>
+
+        <div class="card" id="al-editor" hidden>
+          <h3 id="al-editor-title">New rule</h3>
+          <div class="set-row"><label for="al-name">Name</label><input type="text" id="al-name" placeholder="error spike" autocomplete="off" /></div>
+          <div class="set-row"><label for="al-query">Query</label><input type="text" id="al-query" class="mono" placeholder="level=error | stats count by service" autocomplete="off" /></div>
+          <div class="set-row"><label for="al-window">Window (seconds) — how far back each check looks</label><input type="number" id="al-window" min="10" value="300" /></div>
+          <div class="set-row"><label for="al-interval">Interval (seconds) — how often to check</label><input type="number" id="al-interval" min="10" value="60" /></div>
+          <div class="set-row">
+            <label>Fire when the value is</label>
+            <div class="cond-row">
+              <select id="al-op">
+                <option value="gt">&gt;</option>
+                <option value="gte">&ge;</option>
+                <option value="lt">&lt;</option>
+                <option value="lte">&le;</option>
+                <option value="eq">=</option>
+                <option value="ne">&ne;</option>
+              </select>
+              <input type="number" id="al-value" step="any" value="10" />
+            </div>
+          </div>
+          <div class="set-row"><label>Notify these channels</label><div class="keys" id="al-channels"></div></div>
+          <div class="set-row"><label for="al-enabled">Enabled</label><input type="checkbox" id="al-enabled" checked /></div>
+          <div class="set-actions">
+            <button class="btn-primary" id="al-save">Save rule</button>
+            <button class="chip" id="al-dryrun">Test now</button>
+            <button class="chip" id="al-cancel">Cancel</button>
+            <span class="cfg-msg" id="al-editor-msg"></span>
+          </div>
+          <pre class="dryrun" id="al-dryrun-out" hidden></pre>
+        </div>
+      </div>
+
+      <div class="settings-col">
+        <div class="card">
+          <h3>Notification channels</h3>
+          <p class="hint">A <strong>webhook</strong> receives the full JSON payload; <strong>slack</strong> receives a rendered <code>{"text"}</code>. The server makes outbound requests to these URLs.</p>
+          <div class="chans" id="al-chan-list"></div>
+          <div class="set-row"><label for="al-chan-name">Name</label><input type="text" id="al-chan-name" placeholder="ops" autocomplete="off" /></div>
+          <div class="set-row"><label for="al-chan-type">Type</label>
+            <select id="al-chan-type"><option value="webhook">webhook</option><option value="slack">slack</option></select>
+          </div>
+          <div class="set-row"><label for="al-chan-url">URL</label><input type="text" id="al-chan-url" class="mono" placeholder="https://hooks.slack.com/services/..." autocomplete="off" /></div>
+          <div class="set-actions">
+            <button class="btn-primary" id="al-chan-add">Add channel</button>
+            <span class="cfg-msg" id="al-chan-msg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- SETTINGS VIEW -->
