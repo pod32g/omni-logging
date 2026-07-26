@@ -1116,6 +1116,67 @@
           }
         }
       }
+    },
+    "/v1/logs": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "OTLP/HTTP logs receiver (protobuf and JSON, optionally gzipped)",
+        "description": "The standard OTLP path, so OTEL_EXPORTER_OTLP_ENDPOINT pointing at this server works with no extra configuration. Both the protobuf and JSON encodings are accepted; an unrecognised Content-Type is treated as protobuf, which is what exporters default to. Resource attributes service.name and host.name become the event's service and source, the OTLP severity number becomes the level, and trace/span IDs become attributes.",
+        "security": [
+          {
+            "ingestKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-protobuf": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted. A partialSuccess body reports how many records were refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "partialSuccess": {
+                      "type": "object",
+                      "properties": {
+                        "rejectedLogRecords": {
+                          "type": "integer"
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The export could not be decoded"
+          },
+          "413": {
+            "description": "Request body too large"
+          }
+        }
+      }
     }
   },
   "components": {

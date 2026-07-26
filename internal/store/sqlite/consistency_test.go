@@ -69,3 +69,63 @@ func TestFreeTextAgreesWithLiveTail(t *testing.T) {
 		}
 	}
 }
+
+// TestBooleanAttributesAgree covers a trap SQLite sets: it has no boolean type,
+// so json_extract turns a JSON true into the integer 1. The obvious text
+// comparison never matched, so attr.flag=true silently returned nothing — while
+// the in-memory matcher, which stringifies Go's bool as "true", happily matched
+// it. Search and live tail disagreed.
+func TestBooleanAttributesAgree(t *testing.T) {
+	d := newTestDB(t)
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+
+	events := []model.LogEvent{
+		{Message: "yes", Attributes: map[string]any{"flag": true}},
+		{Message: "no", Attributes: map[string]any{"flag": false}},
+		{Message: "quoted", Attributes: map[string]any{"flag": "true"}},
+		{Message: "absent"},
+	}
+	for i := range events {
+		events[i].Normalize(base.Add(time.Duration(i) * time.Second))
+	}
+	if err := d.Append(context.Background(), events); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	for _, expr := range []string{
+		"attr.flag=true", "attr.flag=false", "attr.flag!=true", "attr.flag!=false",
+		"attr.flag=1", "attr.flag=0", "attr.flag=*",
+	} {
+		q, err := query.Parse(expr)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", expr, err)
+		}
+		q.Normalize()
+
+		res, err := d.Search(context.Background(), q)
+		if err != nil {
+			t.Fatalf("Search(%q): %v", expr, err)
+		}
+		fromSearch := map[string]bool{}
+		for _, e := range res.Events {
+			fromSearch[e.ID] = true
+		}
+		for _, e := range events {
+			if got, want := q.Matches(e), fromSearch[e.ID]; got != want {
+				t.Errorf("%q on %q: live tail matches=%v but search returned=%v",
+					expr, e.Message, got, want)
+			}
+		}
+	}
+
+	// And the headline case actually finds the event now.
+	q, _ := query.Parse("attr.flag=true")
+	q.Normalize()
+	res, err := d.Search(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 2 {
+		t.Fatalf("attr.flag=true matched %d, want 2 (the real boolean and the quoted string)", res.Total)
+	}
+}

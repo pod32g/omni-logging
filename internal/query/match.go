@@ -60,7 +60,13 @@ func (f Filter) matches(e model.LogEvent) bool {
 		return actual != ""
 	case OpNeq:
 		// A missing attribute satisfies !=.
-		return !present || actual != want
+		if !present {
+			return true
+		}
+		if boolEqual(actual, want) {
+			return false
+		}
+		return actual != want
 	}
 
 	if !present {
@@ -69,6 +75,9 @@ func (f Filter) matches(e model.LogEvent) bool {
 
 	switch f.Op {
 	case OpEq:
+		if boolEqual(actual, want) {
+			return true
+		}
 		return actual == want
 	case OpIn:
 		for _, v := range f.Values {
@@ -86,6 +95,40 @@ func (f Filter) matches(e model.LogEvent) bool {
 		return compareMatch(f.Op, actual, want)
 	default:
 		return actual == want
+	}
+}
+
+// compareString renders an attribute the way SQLite's json_extract does, which
+// is what a filter is actually compared against. The only divergence from
+// stringify is bool: SQLite has no boolean type and yields 1/0, so rendering
+// Go's true as "true" here would make attr.flag=1 match in search and not in
+// live tail. Free-text matching still uses stringify, because the FTS text the
+// store indexes is built with %v.
+func compareString(v any) string {
+	switch b := v.(type) {
+	case bool:
+		if b {
+			return "1"
+		}
+		return "0"
+	}
+	return stringify(v)
+}
+
+// boolEqual matches a boolean the way the store does. SQLite has no boolean
+// type, so a JSON true reads back as 1; accepting both spellings on both sides
+// is what keeps live tail and search from disagreeing about attr.flag=true.
+func boolEqual(actual, want string) bool {
+	w := strings.ToLower(want)
+	if w != "true" && w != "false" {
+		return false
+	}
+	a := strings.ToLower(actual)
+	switch w {
+	case "true":
+		return a == "true" || a == "1"
+	default:
+		return a == "false" || a == "0"
 	}
 }
 
@@ -117,7 +160,7 @@ func (f Filter) actual(e model.LogEvent) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return stringify(v), true
+		return compareString(v), true
 	}
 	return "", false
 }

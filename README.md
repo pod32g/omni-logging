@@ -8,6 +8,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 ## Features (v1)
 
 - **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs.
+- **OTLP receiver** — OpenTelemetry logs over OTLP/HTTP at `/v1/logs`, in both the protobuf and JSON encodings, so an OTel SDK or Collector can point straight at it.
 - **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
 - **Parsing pipelines** — ordered grok/regex/timestamp stages applied at ingest, turning unstructured text into searchable fields. Scoped with the ordinary query language, editable at runtime, testable against a sample line before you save.
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
@@ -131,6 +132,7 @@ Single Go binary, packages under `internal/`:
 | `pipeline` | Grok/regex extraction, timestamp parsing, ingest-time transforms |
 | `alert` | Rule evaluation, scheduling and notification delivery |
 | `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
+| `otlp` | OpenTelemetry logs receiver (hand-rolled protobuf + JSON) |
 
 The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
 project builds with a single `go build` — no Node toolchain required. See the
@@ -234,6 +236,32 @@ omnilog forward --server http://HOST:8080 --api-key devkey \
 The spool reuses `internal/wal` rather than introducing a second append-only
 log: CRC-checked records, torn-tail recovery, segment rotation and a checkpoint
 are exactly what "keep this until it is acknowledged" needs.
+
+## OpenTelemetry (OTLP)
+
+`/v1/logs` is the standard OTLP/HTTP path, so pointing an SDK or Collector at
+the server needs no special configuration:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://HOST:8080
+export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=devkey"
+```
+
+Both the **protobuf** and **JSON** encodings are accepted, gzipped or not. An
+unrecognised `Content-Type` is treated as protobuf, since that is what
+exporters default to and some omit the header.
+
+Mapping: `service.name` and `host.name` resource attributes become the event's
+service and source, the OTLP severity number becomes the level (falling back to
+`severityText` when the number is absent), the body becomes the message, and
+trace/span IDs become searchable attributes. Resource attributes are kept as
+attributes too. Rejected records are reported in the response's
+`partialSuccess` so a collector retries those rather than resending everything.
+
+> The protobuf decoder is written by hand against the OTLP wire format rather
+> than generated from the `.proto` files. That keeps the dependency tree as it
+> is — one SQLite driver and a YAML parser — and unknown fields are skipped, so
+> a newer OTLP version does not break the receiver.
 
 ## Parsing pipelines
 

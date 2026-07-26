@@ -105,10 +105,20 @@ func filterCond(f query.Filter) (string, []any) {
 
 	switch f.Op {
 	case query.OpEq:
+		if isAttr && isBoolLiteral(f.Value) {
+			cond, args := attrBoolCond(path, f.Value)
+			return cond, args
+		}
 		e, a := textExpr()
 		return e + " = ?", append(a, norm(f.Value))
 	case query.OpNeq:
 		if isAttr {
+			if isBoolLiteral(f.Value) {
+				cond, args := attrBoolCond(path, f.Value)
+				// A missing attribute satisfies != , as it does for text.
+				return "(json_extract(logs.attributes, ?) IS NULL OR NOT " + cond + ")",
+					append([]any{path}, args...)
+			}
 			return "(json_extract(logs.attributes, ?) IS NULL OR CAST(json_extract(logs.attributes, ?) AS TEXT) != ?)",
 				[]any{path, path, f.Value}
 		}
@@ -143,6 +153,28 @@ func filterCond(f query.Filter) (string, []any) {
 		return e + " " + sym + " ?", append(a, norm(f.Value))
 	}
 	return "", nil
+}
+
+// isBoolLiteral reports whether a filter value is written as a boolean.
+func isBoolLiteral(v string) bool {
+	return strings.EqualFold(v, "true") || strings.EqualFold(v, "false")
+}
+
+// attrBoolCond compares a JSON boolean attribute.
+//
+// SQLite has no boolean type: json_extract turns JSON true into the integer 1,
+// so the obvious "CAST(... AS TEXT) = 'true'" never matches and attr.flag=true
+// silently returns nothing. json_type reports the real JSON type, so match on
+// that — and also accept the literal string "true", since a producer may send
+// the value quoted. The in-memory matcher applies the same rule, so live tail
+// and search cannot disagree about a boolean.
+func attrBoolCond(path, value string) (string, []any) {
+	want := "false"
+	if strings.EqualFold(value, "true") {
+		want = "true"
+	}
+	return "(json_type(logs.attributes, ?) = ? OR lower(CAST(json_extract(logs.attributes, ?) AS TEXT)) = ?)",
+		[]any{path, want, path, want}
 }
 
 func compareSym(op query.Op) string {

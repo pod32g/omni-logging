@@ -13,6 +13,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/metrics"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/otlp"
 	"github.com/pod32g/omni-logging/internal/pipeline"
 	"github.com/pod32g/omni-logging/internal/query"
 	"github.com/pod32g/omni-logging/internal/settings"
@@ -176,6 +177,14 @@ func (s *Server) routes() []route {
 	if s.ingestor != nil {
 		add("POST", "/api/v1/ingest", s.requireIngestKey(s.ingestor.Handler()), true)
 		add("POST", "/api/v1/ingest/raw", s.requireIngestKey(s.ingestor.RawHandler()), true)
+		// /v1/logs is the path OTLP exporters expect, so an OTEL_EXPORTER_OTLP_
+		// ENDPOINT pointing at this server works with no extra configuration.
+		otlpHandler := otlp.Handler(otlp.Options{
+			Sink:   s.ingestor.Enqueue,
+			Now:    s.now,
+			Logger: s.logger,
+		})
+		add("POST", "/v1/logs", s.requireIngestKey(otlpHandler), true)
 	}
 	add("GET", "/api/v1/search", s.requireAdmin(s.handleSearch), true)
 	add("GET", "/api/v1/search/stats", s.requireAdmin(s.handleStats), true)
