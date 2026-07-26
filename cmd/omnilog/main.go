@@ -30,6 +30,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/forward"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/pipeline"
 	"github.com/pod32g/omni-logging/internal/queryclient"
 	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
@@ -221,6 +222,19 @@ func runServe(args []string, logger *slog.Logger) error {
 		logger.Info("settings applied", "retention_days", m.RetentionDays, "rate_per_sec", m.RateLimitPerSec, "log_level", m.LogLevel)
 	})
 
+	// Ingest pipelines: compiled once at startup and hot-swapped whenever one
+	// is edited, so a parse rule takes effect on the next event.
+	pipelineSet := pipeline.NewSet(logger)
+	if specs, perr := store.ListPipelines(context.Background()); perr != nil {
+		return fmt.Errorf("load pipelines: %w", perr)
+	} else if rerr := pipelineSet.Replace(specs); rerr != nil {
+		// A stored pipeline that no longer compiles must not stop the server
+		// from starting; ingest simply runs without it until it is fixed.
+		logger.Error("a stored pipeline failed to compile and is not active", "error", rerr)
+	} else if n := pipelineSet.Len(); n > 0 {
+		logger.Info("ingest pipelines active", "pipelines", n)
+	}
+
 	hub := tail.NewHub()
 	ing := ingest.New(store, hub, ingest.Options{
 		BufferSize:    cfg.BufferSize,
@@ -229,6 +243,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		Logger:        logger,
 		WAL:           w,
 		Limiter:       limiter,
+		Pipelines:     pipelineSet,
 	})
 	// Replay any events accepted before a previous crash, then start the writer.
 	if w != nil {
@@ -291,6 +306,9 @@ func runServe(args []string, logger *slog.Logger) error {
 		Settings: mgr,
 		Closing:  closing,
 		Alerts:   store,
+
+		Pipelines:   store,
+		PipelineSet: pipelineSet,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

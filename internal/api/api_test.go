@@ -14,6 +14,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/pipeline"
 	settingspkg "github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/store/sqlite"
@@ -74,7 +75,8 @@ func newServer(t *testing.T, cfg config.Config) (*Server, *sqlite.DB) {
 	ing.Start()
 	t.Cleanup(func() { ing.Stop() })
 
-	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub, Alerts: db})
+	srv := New(Deps{Config: cfg, Store: db, Ingestor: ing, Hub: hub, Alerts: db,
+		Pipelines: db, PipelineSet: pipeline.NewSet(nil)})
 	return srv, db
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/metrics"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/pipeline"
 	"github.com/pod32g/omni-logging/internal/query"
 	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store"
@@ -38,6 +39,10 @@ type Deps struct {
 	// Alerts persists alert rules and channels. nil disables the alerting
 	// endpoints entirely rather than serving ones that cannot store anything.
 	Alerts AlertStore
+	// Pipelines persists ingest pipelines; PipelineSet is the live compiled set
+	// the ingestor consults. Both are needed for the endpoints to be served.
+	Pipelines   PipelineStore
+	PipelineSet *pipeline.Set
 }
 
 // Server holds API dependencies and builds the HTTP handler.
@@ -53,6 +58,9 @@ type Server struct {
 	version  string
 	closing  <-chan struct{}
 	alerts   AlertStore
+
+	pipelines   PipelineStore
+	pipelineSet *pipeline.Set
 
 	// exportSlots bounds concurrent exports so a handful of long downloads
 	// cannot occupy every read connection and starve interactive searches.
@@ -90,6 +98,8 @@ func New(d Deps) *Server {
 		version:     d.Version,
 		closing:     d.Closing,
 		alerts:      d.Alerts,
+		pipelines:   d.Pipelines,
+		pipelineSet: d.PipelineSet,
 		metrics:     d.Metrics,
 		exportSlots: make(chan struct{}, maxConcurrentExports),
 	}
@@ -193,6 +203,14 @@ func (s *Server) routes() []route {
 		add("POST", "/api/v1/alerts/channels", s.requireAdmin(s.handleChannelCreate), true)
 		add("DELETE", "/api/v1/alerts/channels/{id}", s.requireAdmin(s.handleChannelDelete), true)
 		add("POST", "/api/v1/alerts/channels/{id}/test", s.requireAdmin(s.handleChannelTest), true)
+	}
+
+	if s.pipelines != nil {
+		add("GET", "/api/v1/pipelines", s.requireAdmin(s.handlePipelinesList), true)
+		add("POST", "/api/v1/pipelines", s.requireAdmin(s.handlePipelineCreate), true)
+		add("PUT", "/api/v1/pipelines/{id}", s.requireAdmin(s.handlePipelineUpdate), true)
+		add("DELETE", "/api/v1/pipelines/{id}", s.requireAdmin(s.handlePipelineDelete), true)
+		add("POST", "/api/v1/pipelines/test", s.requireAdmin(s.handlePipelineTest), true)
 	}
 
 	metricsHandler := http.Handler(http.HandlerFunc(s.handleMetrics))

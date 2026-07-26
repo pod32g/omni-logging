@@ -23,6 +23,9 @@
     },
     {
       "name": "alerts"
+    },
+    {
+      "name": "pipelines"
     }
   ],
   "paths": {
@@ -879,6 +882,240 @@
           }
         }
       }
+    },
+    "/api/v1/pipelines": {
+      "get": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "List ingest pipelines and the built-in grok pattern names",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pipelines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pipelines": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Pipeline"
+                      }
+                    },
+                    "patterns": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "Create a pipeline",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pipeline"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pipeline"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The pipeline does not compile"
+          }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}": {
+      "put": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "Replace a pipeline",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pipeline"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pipeline"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Does not compile"
+          },
+          "404": {
+            "description": "No such pipeline"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "Delete a pipeline",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such pipeline"
+          }
+        }
+      }
+    },
+    "/api/v1/pipelines/test": {
+      "post": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "Run a sample line through pipelines without saving them",
+        "description": "Omit 'pipelines' to test against the saved set. Grok is unforgiving enough that writing a pattern without testing it against a real line is guesswork.",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "line": {
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "pipelines": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Pipeline"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "$ref": "#/components/schemas/LogEvent"
+                    },
+                    "matched": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A pipeline does not compile"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1264,6 +1501,90 @@
                 }
               }
             }
+          }
+        }
+      },
+      "PipelineStage": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "grok",
+              "regex",
+              "timestamp",
+              "level",
+              "service",
+              "rename",
+              "remove",
+              "set"
+            ]
+          },
+          "field": {
+            "type": "string",
+            "description": "Input field; a first-class field or attr.name. Defaults to message"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "grok expression or RE2 pattern"
+          },
+          "to": {
+            "type": "string",
+            "description": "Target for rename/set"
+          },
+          "value": {
+            "type": "string",
+            "description": "Literal for set"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Targets for remove"
+          },
+          "layouts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Go time layouts for timestamp"
+          },
+          "fail_pipeline": {
+            "type": "boolean",
+            "description": "Abort the pipeline if this stage fails (default: skip it)"
+          }
+        }
+      },
+      "Pipeline": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "match": {
+            "type": "string",
+            "description": "Search expression selecting which events this applies to; empty means all"
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineStage"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "order": {
+            "type": "integer",
+            "description": "Lower runs first"
           }
         }
       }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/pod32g/omni-logging/internal/admission"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/pipeline"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/tail"
 	"github.com/pod32g/omni-logging/internal/wal"
@@ -31,6 +32,9 @@ type Options struct {
 	Logger        *slog.Logger
 	WAL           *wal.WAL           // durable write-ahead log; nil = in-memory only (v1 behavior)
 	Limiter       *admission.Limiter // per-key admission control; nil = disabled
+	// Pipelines transform each event between parse and enqueue. nil disables
+	// the stage entirely.
+	Pipelines *pipeline.Set
 }
 
 // queued is one buffered event plus its WAL sequence number (0 when no WAL).
@@ -74,7 +78,8 @@ type Ingestor struct {
 	wal     *wal.WAL
 	limiter *admission.Limiter
 
-	dedupe *batchDeduper
+	dedupe    *batchDeduper
+	pipelines *pipeline.Set
 
 	ch chan queued
 	wg sync.WaitGroup
@@ -103,13 +108,14 @@ func New(s store.Store, hub *tail.Hub, opts Options) *Ingestor {
 		lim = admission.New(admission.Limits{}, opts.Now) // disabled
 	}
 	return &Ingestor{
-		store:   s,
-		hub:     hub,
-		opts:    opts,
-		wal:     opts.WAL,
-		limiter: lim,
-		dedupe:  newBatchDeduper(opts.Now),
-		ch:      make(chan queued, opts.BufferSize),
+		store:     s,
+		hub:       hub,
+		opts:      opts,
+		wal:       opts.WAL,
+		limiter:   lim,
+		dedupe:    newBatchDeduper(opts.Now),
+		pipelines: opts.Pipelines,
+		ch:        make(chan queued, opts.BufferSize),
 	}
 }
 
@@ -162,6 +168,11 @@ func (i *Ingestor) Start() {
 // queued. Enqueues are serialized so the WAL stays a single ordered log and the
 // capacity check below cannot race a second producer.
 func (i *Ingestor) Enqueue(e model.LogEvent) bool {
+	// Every ingest path (HTTP, raw, syslog) funnels through here, so this is
+	// the one place transforms have to be applied to cover all of them.
+	if i.pipelines != nil {
+		i.pipelines.Apply(&e)
+	}
 	i.enqMu.Lock()
 	if i.closed || len(i.ch) >= cap(i.ch) {
 		i.enqMu.Unlock()

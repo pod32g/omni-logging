@@ -96,6 +96,24 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 5,
+		name:    "ingest pipelines",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS pipelines (
+				id          TEXT PRIMARY KEY,
+				name        TEXT NOT NULL,
+				description TEXT NOT NULL DEFAULT '',
+				match_expr  TEXT NOT NULL DEFAULT '',
+				stages      TEXT NOT NULL,
+				enabled     INTEGER NOT NULL DEFAULT 1,
+				sort_order  INTEGER NOT NULL DEFAULT 0,
+				created_at  INTEGER NOT NULL,
+				updated_at  INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_pipelines_order ON pipelines(sort_order)`,
+		},
+	},
 }
 
 // rebuildFTSRowids re-creates every full-text row keyed by its logs.rowid,

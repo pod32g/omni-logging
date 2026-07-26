@@ -9,6 +9,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 
 - **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs.
 - **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
+- **Parsing pipelines** — ordered grok/regex/timestamp stages applied at ingest, turning unstructured text into searchable fields. Scoped with the ordinary query language, editable at runtime, testable against a sample line before you save.
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — a piped analytics stage (`| stats count by service`, `timechart`, `top`, `rare`), plus the counts-over-time histogram and field facets.
@@ -126,7 +127,8 @@ Single Go binary, packages under `internal/`:
 | `api` | Router, auth + metrics middleware, search/stats/health/metrics handlers |
 | `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
 | `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
-| `forward` | File-tailing forwarder client |
+| `forward` | File-tailing forwarder client (durable spool) |
+| `pipeline` | Grok/regex extraction, timestamp parsing, ingest-time transforms |
 | `alert` | Rule evaluation, scheduling and notification delivery |
 | `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
 
@@ -232,6 +234,44 @@ omnilog forward --server http://HOST:8080 --api-key devkey \
 The spool reuses `internal/wal` rather than introducing a second append-only
 log: CRC-checked records, torn-tail recovery, segment rotation and a checkpoint
 are exactly what "keep this until it is acknowledged" needs.
+
+## Parsing pipelines
+
+Raw text becomes searchable fields at ingest time. A pipeline is a match
+expression plus ordered stages:
+
+```sh
+curl -XPOST localhost:8080/api/v1/pipelines -H 'Content-Type: application/json' -d '{
+  "name": "nginx access",
+  "match": "service=nginx",
+  "enabled": true,
+  "stages": [
+    {"type":"grok","pattern":"%{IP:client} \\S+ \\S+ \\[%{HTTPDATE:ts}\\] \"%{HTTPVERB:method} %{NOTSPACE:path} %{HTTPVER}\" %{INT:status} %{INT:bytes}"},
+    {"type":"timestamp","field":"attr.ts"},
+    {"type":"remove","fields":["ts"]}
+  ]
+}'
+```
+
+That line then answers `attr.status>=500`, `| stats count by attr.method`, and
+anything else the query language can express.
+
+- **Stages** — `grok`, `regex`, `timestamp`, `level`, `service`, `rename`,
+  `remove`, `set`.
+- **Match** is the ordinary search expression, so `service=nginx` means the same
+  thing here as in the search box. Empty applies to every event.
+- **Captures named after a first-class field land there**: `%{LOGLEVEL:level}`
+  sets the event level, not an attribute. Everything else becomes an attribute,
+  with numeric-looking values stored as numbers so comparisons work.
+- **A stage that does not match is skipped, not fatal.** A pattern failing on a
+  particular line is normal; losing the line would be far worse than storing it
+  unenriched. Set `"fail_pipeline": true` on a stage to opt out of that.
+- **Test before you save** — `POST /api/v1/pipelines/test` runs a sample line
+  through unsaved pipelines and shows the resulting event. Grok is unforgiving
+  enough that writing a pattern without trying it is guesswork.
+- Pipelines compile on save, so a bad pattern is a `400` then, not a silent
+  failure on every event afterwards. `GET /api/v1/pipelines` also returns the
+  built-in grok pattern names.
 
 ## Alerting
 
