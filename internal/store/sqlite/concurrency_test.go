@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,5 +105,53 @@ func seedCount(t *testing.T, d *DB, n int) {
 	}
 	if err := d.Append(context.Background(), events); err != nil {
 		t.Fatalf("Append: %v", err)
+	}
+}
+
+// TestReadPoolIsQueryOnly pins the safety net on the read pool: reads and writes
+// are separated by discipline, and query_only is what enforces it if a read path
+// ever tries to write.
+func TestReadPoolIsQueryOnly(t *testing.T) {
+	d, err := Open(t.TempDir() + "/queryonly.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	if d.ro == d.db {
+		t.Fatal("expected a separate read pool for a file-backed database")
+	}
+	if _, err := d.ro.ExecContext(context.Background(),
+		"INSERT INTO logs (id, ts, received_at) VALUES ('probe', 1, 1)"); err == nil {
+		t.Error("the read pool accepted a write: query_only is not in effect")
+	}
+	// ...and the write pool must remain writable.
+	e := model.LogEvent{Message: "writable"}
+	e.Normalize(time.Now())
+	if err := d.Append(context.Background(), []model.LogEvent{e}); err != nil {
+		t.Fatalf("write pool rejected an append: %v", err)
+	}
+}
+
+// TestPingChecksBothPools covers readiness. Every search, stat and export runs
+// on the read pool, so a probe that only touched the write pool would report
+// ready while all reads failed.
+func TestPingChecksBothPools(t *testing.T) {
+	d, err := Open(t.TempDir() + "/ping.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.db.Close()
+	if err := d.Ping(context.Background()); err != nil {
+		t.Fatalf("healthy store failed Ping: %v", err)
+	}
+
+	// Break only the read pool; the write pool stays up.
+	if err := d.ro.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Ping(context.Background()); err == nil {
+		t.Fatal("Ping reported ready with a dead read pool")
+	} else if !strings.Contains(err.Error(), "read pool") {
+		t.Errorf("error should name the failing pool, got: %v", err)
 	}
 }

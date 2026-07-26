@@ -159,8 +159,21 @@ func (d *DB) Close() error {
 	return firstErr
 }
 
-// Ping verifies the database connection is alive. It powers the readiness probe.
-func (d *DB) Ping(ctx context.Context) error { return d.db.PingContext(ctx) }
+// Ping verifies the database is reachable. It powers the readiness probe, so it
+// checks BOTH pools: every search, stat and export runs on the read pool, and a
+// probe that only touched the write pool would report ready while all reads
+// failed.
+func (d *DB) Ping(ctx context.Context) error {
+	if err := d.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("write pool: %w", err)
+	}
+	if d.ro != d.db {
+		if err := d.ro.PingContext(ctx); err != nil {
+			return fmt.Errorf("read pool: %w", err)
+		}
+	}
+	return nil
+}
 
 // Append writes a batch of events in a single transaction, updating both the
 // structured table and the full-text index.

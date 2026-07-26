@@ -27,9 +27,15 @@ func (q Query) Matches(e model.LogEvent) bool {
 			return false
 		}
 	}
-	for _, term := range q.Terms {
-		if !termMatches(e, term) {
-			return false
+	// Tokenize once for the whole query, not once per term: this runs inside the
+	// tail hub's fan-out, which the ingest batch writer calls synchronously, so
+	// per-term re-tokenization showed up directly as ingest throughput.
+	if len(q.Terms) > 0 {
+		toks := ftsTokens(e)
+		for _, term := range q.Terms {
+			if !termMatchesTokens(toks, term) {
+				return false
+			}
 		}
 	}
 	return true
@@ -207,12 +213,19 @@ const maxRegexCache = 1024
 // while returning nothing from search — so we tokenize the same way FTS5's
 // default tokenizer does (runs of letters and digits, case-folded) and look for
 // the term's tokens as a contiguous subsequence.
+// It tokenizes the event on each call; Matches goes through termMatchesTokens
+// so a multi-term query pays for tokenization only once.
 func termMatches(e model.LogEvent, term string) bool {
+	return termMatchesTokens(ftsTokens(e), term)
+}
+
+// termMatchesTokens reports whether term matches an already-tokenized event.
+func termMatchesTokens(have []string, term string) bool {
 	want := ftsTokenize(term)
 	if len(want) == 0 {
 		return false // FTS5 matches nothing for a term with no tokens
 	}
-	return containsTokens(ftsTokens(e), want)
+	return containsTokens(have, want)
 }
 
 // ftsTokens builds the token stream for the event's searchable text, in the

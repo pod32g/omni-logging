@@ -79,8 +79,14 @@ func loopbackOnly(next http.Handler) http.Handler {
 // and response status code only (no path label, to bound cardinality). The
 // method is normalized to a fixed allowlist so an attacker cannot grow the
 // series set unboundedly by sending arbitrary HTTP methods (these endpoints are
-// unauthenticated by design). Recording runs in a defer so a panicking handler
-// is still counted (as a 500) before the panic propagates to recoverMiddleware.
+// unauthenticated by design). Recording runs in a defer so a request that
+// panics past this layer is still counted.
+//
+// Recovery sits INSIDE this middleware, so an ordinary handler panic has already
+// been converted to a 500 by the time the status is read here. The one panic
+// that still reaches this defer is http.ErrAbortHandler, raised deliberately by
+// the export path to cut a response short; that request already sent its status
+// line, so it is recorded as the status actually sent rather than as a 500.
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -89,14 +95,14 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			p := recover()
 			status := rec.status
-			if p != nil {
+			if p != nil && p != http.ErrAbortHandler {
 				status = http.StatusInternalServerError
 			}
 			code := strconv.Itoa(status)
 			s.httpReqs.With(method, code).Inc()
 			s.httpDur.With(method, code).Observe(time.Since(start).Seconds())
 			if p != nil {
-				panic(p) // let recoverMiddleware turn it into the 500 response
+				panic(p) // ErrAbortHandler must reach net/http to abort the response
 			}
 		}()
 		next.ServeHTTP(rec, r)

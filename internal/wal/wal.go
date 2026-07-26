@@ -158,23 +158,36 @@ func (w *WAL) Append(payload []byte) (uint64, error) {
 	w.nextSeq++
 	if w.syncOnAppend {
 		if err := w.active.Sync(); err != nil {
-			return 0, err
+			// Roll the record back. Returning an error tells the caller the event
+			// was NOT accepted, and it will be reported to the client as rejected —
+			// so the record must not stay in the log to be replayed into the store
+			// on the next restart.
+			w.activeSize -= int64(len(rec))
+			w.nextSeq--
+			if terr := w.active.Truncate(w.activeSize); terr != nil {
+				return 0, fmt.Errorf("wal: sync record: %w (rollback also failed: %v)", err, terr)
+			}
+			return 0, fmt.Errorf("wal: sync record: %w", err)
 		}
 	}
 	return seq, nil
 }
 
+// rotateLocked retires the active segment. The handle is cleared even when Sync
+// or Close reports an error: leaving a half-closed file as the active segment
+// would make every later append fail against a descriptor that is already gone.
 func (w *WAL) rotateLocked() error {
-	if w.active != nil {
-		if err := w.active.Sync(); err != nil {
-			return err
-		}
-		if err := w.active.Close(); err != nil {
-			return err
-		}
-		w.active = nil
+	f := w.active
+	if f == nil {
+		return nil
 	}
-	return nil
+	w.active = nil
+	w.activeSize = 0
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (w *WAL) openNewSegmentLocked(startSeq uint64) error {

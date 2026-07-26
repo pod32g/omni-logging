@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,7 +86,7 @@ func TestClientIPHandlesIPv6(t *testing.T) {
 func TestOversizeBodyIsRejected(t *testing.T) {
 	// A small body cap keeps this cheap; the production default is 32 MiB.
 	const bodyCap = 64 << 10
-	oneLine := strings.Repeat("x", readBufBytes+1024)
+	oneLine := strings.Repeat("x", defaultMaxLineBytes+1024)
 	manyLines := strings.Repeat(strings.Repeat("y", 255)+"\n", (bodyCap/256)+16)
 
 	for _, tc := range []struct{ name, body string }{
@@ -127,5 +128,50 @@ func TestPartialJSONArrayReportsWhatWasAccepted(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"accepted":2`) {
 		t.Fatalf("response should report the records already accepted: %s", rr.Body.String())
+	}
+}
+
+// TestPrettyPrintedJSONIsAccepted covers multi-line records. Splitting the body
+// purely on newlines rejected a valid, pretty-printed application/json object as
+// several broken fragments — and returned 200 while doing it.
+func TestPrettyPrintedJSONIsAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		accepted int
+		rejected int
+	}{
+		{"pretty single object", "{\n  \"service\": \"api\",\n  \"message\": \"hi\"\n}", 1, 0},
+		{"pretty array", "[\n  {\"service\":\"api\",\"message\":\"a\"},\n  {\"service\":\"api\",\"message\":\"b\"}\n]", 2, 0},
+		{"compact single object", `{"service":"api","message":"hi"}`, 1, 0},
+		{"two pretty objects back to back", "{\n \"message\": \"a\"\n}\n{\n \"message\": \"b\"\n}", 2, 0},
+		{"pretty object then ndjson line", "{\n \"message\": \"a\"\n}\n{\"message\":\"b\"}", 2, 0},
+		// Per-record resilience must survive: a bad record in the middle is
+		// rejected on its own without swallowing the records after it.
+		{"bad line between good ones", "{\"message\":\"a\"}\nnot-json\n{\"message\":\"b\"}", 2, 1},
+		{"trailing truncated object", "{\"message\":\"a\"}\n{\"message\":", 1, 1},
+		{"blank lines between records", "{\"message\":\"a\"}\n\n\n{\"message\":\"b\"}\n", 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newStore(t)
+			ing := New(db, nil, Options{FlushInterval: time.Hour})
+			ing.Start()
+			defer ing.Stop()
+
+			rr := httptest.NewRecorder()
+			ing.Handler()(rr, httptest.NewRequest(http.MethodPost, "/api/v1/ingest", strings.NewReader(tc.body)))
+
+			var got struct {
+				Accepted int `json:"accepted"`
+				Rejected int `json:"rejected"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode response %q: %v", rr.Body.String(), err)
+			}
+			if got.Accepted != tc.accepted || got.Rejected != tc.rejected {
+				t.Fatalf("accepted=%d rejected=%d, want %d/%d (%s)",
+					got.Accepted, got.Rejected, tc.accepted, tc.rejected, rr.Body.String())
+			}
+		})
 	}
 }

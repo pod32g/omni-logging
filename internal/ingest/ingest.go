@@ -26,6 +26,7 @@ type Options struct {
 	BatchSize     int           // max events written per transaction
 	FlushInterval time.Duration // max time a partial batch waits before writing
 	MaxBodyBytes  int64         // per-request body cap (default 32 MiB)
+	MaxLineBytes  int           // longest single NDJSON/raw line accepted (default 1 MiB)
 	Now           func() time.Time
 	Logger        *slog.Logger
 	WAL           *wal.WAL           // durable write-ahead log; nil = in-memory only (v1 behavior)
@@ -50,6 +51,9 @@ func (o *Options) withDefaults() {
 	}
 	if o.MaxBodyBytes <= 0 {
 		o.MaxBodyBytes = defaultMaxBodyBytes
+	}
+	if o.MaxLineBytes <= 0 {
+		o.MaxLineBytes = defaultMaxLineBytes
 	}
 	if o.Now == nil {
 		o.Now = time.Now

@@ -16,24 +16,18 @@ const el = (tag, cls, text) => {
 const METHODS = ["get", "post", "put", "patch", "delete"];
 const slug = (method, path) => (method + path).replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase();
 
-// resolveRef follows a local "#/components/..." pointer one level. Anything
-// unresolvable comes back as null and the caller falls back to a plain label.
-function resolveRef(spec, ref) {
-  if (typeof ref !== "string" || !ref.startsWith("#/")) return null;
-  return ref.slice(2).split("/").reduce((acc, part) => (acc == null ? null : acc[part]), spec);
-}
-
-// typeLabel renders a schema as a short human-readable type.
-function typeLabel(spec, schema) {
+// typeLabel renders a schema as a short human-readable type. A $ref is shown by
+// its schema name, which the Schemas section below spells out in full.
+function typeLabel(schema) {
   if (!schema) return "";
   if (schema.$ref) return schema.$ref.split("/").pop();
-  if (schema.type === "array") return typeLabel(spec, schema.items) + "[]";
+  if (schema.type === "array") return typeLabel(schema.items) + "[]";
   let label = schema.type || "object";
   if (Array.isArray(schema.enum)) label += " (" + schema.enum.join(" | ") + ")";
   return label;
 }
 
-function paramTable(spec, params) {
+function paramTable(params) {
   const table = el("table");
   const head = el("tr");
   ["Name", "In", "Type", "Description"].forEach((h) => head.appendChild(el("th", null, h)));
@@ -48,21 +42,21 @@ function paramTable(spec, params) {
     }
     row.appendChild(name);
     row.appendChild(el("td", null, p.in || ""));
-    row.appendChild(el("td", null, typeLabel(spec, p.schema)));
+    row.appendChild(el("td", null, typeLabel(p.schema)));
     row.appendChild(el("td", "desc-cell", p.description || ""));
     table.appendChild(row);
   });
   return table;
 }
 
-function bodySection(spec, body) {
+function bodySection(body) {
   const wrap = document.createDocumentFragment();
   wrap.appendChild(el("h3", null, "Request body"));
   const content = body.content || {};
   Object.keys(content).forEach((mime) => {
     const line = el("p");
     line.appendChild(el("code", null, mime));
-    const t = typeLabel(spec, content[mime].schema);
+    const t = typeLabel(content[mime].schema);
     if (t) line.appendChild(document.createTextNode(" — " + t));
     wrap.appendChild(line);
   });
@@ -70,7 +64,7 @@ function bodySection(spec, body) {
   return wrap;
 }
 
-function responseTable(spec, responses) {
+function responseTable(responses) {
   const table = el("table");
   const head = el("tr");
   ["Status", "Description", "Body"].forEach((h) => head.appendChild(el("th", null, h)));
@@ -83,13 +77,13 @@ function responseTable(spec, responses) {
     row.appendChild(c);
     row.appendChild(el("td", "desc-cell", r.description || ""));
     const mimes = Object.keys(r.content || {});
-    row.appendChild(el("td", null, mimes.map((m) => m + " " + typeLabel(spec, r.content[m].schema)).join(", ")));
+    row.appendChild(el("td", null, mimes.map((m) => m + " " + typeLabel(r.content[m].schema)).join(", ")));
     table.appendChild(row);
   });
   return table;
 }
 
-function renderOperation(spec, path, method, op) {
+function renderOperation(path, method, op) {
   const card = el("article", "op");
   card.id = slug(method, path);
 
@@ -108,12 +102,12 @@ function renderOperation(spec, path, method, op) {
   const params = op.parameters || [];
   if (params.length) {
     card.appendChild(el("h3", null, "Parameters"));
-    card.appendChild(paramTable(spec, params));
+    card.appendChild(paramTable(params));
   }
-  if (op.requestBody) card.appendChild(bodySection(spec, op.requestBody));
+  if (op.requestBody) card.appendChild(bodySection(op.requestBody));
   if (op.responses) {
     card.appendChild(el("h3", null, "Responses"));
-    card.appendChild(responseTable(spec, op.responses));
+    card.appendChild(responseTable(op.responses));
   }
   return card;
 }
@@ -147,7 +141,7 @@ function render(spec) {
   Object.keys(spec.paths || {}).forEach((path) => {
     const item = spec.paths[path];
     METHODS.filter((m) => item[m]).forEach((method) => {
-      ops.appendChild(renderOperation(spec, path, method, item[method]));
+      ops.appendChild(renderOperation(path, method, item[method]));
       const link = el("a");
       link.href = "#" + slug(method, path);
       link.appendChild(el("span", "method " + method, method.toUpperCase()));

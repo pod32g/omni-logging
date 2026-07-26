@@ -7,6 +7,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -34,6 +35,14 @@ const mutableKey = "mutable"
 
 // Manager holds the current mutable settings and applies changes live.
 type Manager struct {
+	// applyMu serializes whole apply operations (read → merge → validate →
+	// persist → swap). mu alone is not enough: a merging update is a
+	// read-modify-write, so without this two concurrent partial updates can
+	// each read the same base and the second can drop the first's changes.
+	// It also keeps the store and the in-memory copy from diverging, which
+	// interleaved applies could otherwise cause.
+	applyMu sync.Mutex
+
 	mu    sync.RWMutex
 	cur   Mutable
 	store Store
@@ -94,22 +103,51 @@ func (m *Manager) RetentionDays() int {
 	return m.cur.RetentionDays
 }
 
+// ErrInvalidJSON marks a settings document that could not be parsed, so a
+// caller can tell malformed input from input that failed validation.
+var ErrInvalidJSON = errors.New("invalid settings JSON")
+
 // Apply validates next, makes it current, persists it, and fires change hooks.
+// next fully replaces the current settings.
 func (m *Manager) Apply(ctx context.Context, next Mutable) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	_, _, err := m.applyLocked(ctx, next)
+	return err
+}
+
+// ApplyJSON merges a settings document over the current values and applies the
+// result, returning the settings before and after. Fields absent from the
+// document keep their current value. The whole read-merge-persist sequence runs
+// under applyMu, so concurrent partial updates cannot lose each other.
+func (m *Manager) ApplyJSON(ctx context.Context, raw []byte) (prev, next Mutable, err error) {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
+	next = m.Current()
+	if uerr := json.Unmarshal(raw, &next); uerr != nil {
+		return Mutable{}, Mutable{}, fmt.Errorf("%w: %s", ErrInvalidJSON, uerr)
+	}
+	return m.applyLocked(ctx, next)
+}
+
+// applyLocked persists and installs next. Caller holds applyMu.
+func (m *Manager) applyLocked(ctx context.Context, next Mutable) (prev, applied Mutable, err error) {
 	next.IngestKeys = normalizeKeys(next.IngestKeys)
 	next.LogLevel = strings.ToLower(strings.TrimSpace(next.LogLevel))
-	if err := Validate(next); err != nil {
-		return err
+	if verr := Validate(next); verr != nil {
+		return Mutable{}, Mutable{}, verr
 	}
-	raw, err := json.Marshal(next)
-	if err != nil {
-		return err
+	raw, merr := json.Marshal(next)
+	if merr != nil {
+		return Mutable{}, Mutable{}, merr
 	}
-	if err := m.store.PutSettings(ctx, map[string]string{mutableKey: string(raw)}); err != nil {
-		return err
+	if perr := m.store.PutSettings(ctx, map[string]string{mutableKey: string(raw)}); perr != nil {
+		return Mutable{}, Mutable{}, perr
 	}
 
 	m.mu.Lock()
+	prev = m.cur.clone()
 	m.cur = next
 	hooks := make([]func(Mutable), len(m.hooks))
 	copy(hooks, m.hooks)
@@ -119,7 +157,7 @@ func (m *Manager) Apply(ctx context.Context, next Mutable) error {
 	for _, fn := range hooks {
 		fn(snapshot)
 	}
-	return nil
+	return prev, snapshot, nil
 }
 
 // Validate checks a settings value for sanity.

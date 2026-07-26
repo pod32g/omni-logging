@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/query"
+	"github.com/pod32g/omni-logging/internal/settings"
 )
 
 // handleSearch executes a search and returns matching events plus the total.
@@ -86,17 +89,23 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "settings management not enabled", http.StatusServiceUnavailable)
 		return
 	}
-	next := s.settings.Current()
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&next); err != nil {
-		http.Error(w, "invalid settings JSON: "+err.Error(), http.StatusBadRequest)
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "could not read settings body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	hadKeys := len(s.settings.IngestKeys()) > 0
-	if err := s.settings.Apply(r.Context(), next); err != nil {
+	// The merge happens inside the manager so the read-modify-write is atomic
+	// against a concurrent update.
+	prev, next, err := s.settings.ApplyJSON(r.Context(), raw)
+	if err != nil {
+		if errors.Is(err, settings.ErrInvalidJSON) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "invalid settings: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if hadKeys && len(s.settings.IngestKeys()) == 0 {
+	if len(prev.IngestKeys) > 0 && len(next.IngestKeys) == 0 {
 		s.logger.Warn("ingest authentication disabled: all ingest keys cleared via settings",
 			"request_id", requestIDFromCtx(r.Context()))
 	}

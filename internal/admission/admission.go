@@ -87,12 +87,16 @@ func (l *Limiter) SetLimits(limits Limits) {
 // applies the rate token bucket and the daily quotas, consuming a rate token on
 // success. It does NOT add to the daily counters — call Record afterwards with
 // the actual accepted counts.
+// The enabled check runs under the same lock acquisition as the decision:
+// taking the mutex twice (once via Enabled, once here) both doubled the lock
+// traffic on every ingest request and left a window where SetLimits could
+// change the limits between the two.
 func (l *Limiter) Allow(key string, bytes int64) Decision {
-	if !l.Enabled() {
-		return Decision{Allowed: true}
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.enabledLocked() {
+		return Decision{Allowed: true}
+	}
 	st := l.stateLocked(key)
 
 	if l.limits.RatePerSec > 0 && st.tokens < 1 {
@@ -112,11 +116,11 @@ func (l *Limiter) Allow(key string, bytes int64) Decision {
 
 // Record adds accepted events and ingested bytes to the key's daily usage.
 func (l *Limiter) Record(key string, events, bytes int64) {
-	if !l.Enabled() {
-		return
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.enabledLocked() {
+		return
+	}
 	st := l.stateLocked(key)
 	st.events += events
 	st.bytes += bytes

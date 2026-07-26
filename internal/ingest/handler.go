@@ -17,10 +17,15 @@ import (
 // per-Ingestor with Options.MaxBodyBytes.
 const defaultMaxBodyBytes = 32 << 20 // 32 MiB
 
-// readBufBytes is the streaming read buffer, and therefore the largest single
-// NDJSON line or raw log line accepted. Bodies are consumed incrementally, so
-// request memory is bounded by this rather than by the whole-body cap.
-const readBufBytes = 1 << 20 // 1 MiB
+// defaultMaxLineBytes is the largest single NDJSON or raw log line accepted.
+// Bodies are consumed incrementally, so per-request memory is bounded by this
+// rather than by the whole-body cap. Raise it with Options.MaxLineBytes if a
+// producer emits genuinely huge single lines (before the body was streamed, the
+// effective ceiling was the whole-body cap).
+const defaultMaxLineBytes = 1 << 20 // 1 MiB
+
+// peekBufBytes only has to be large enough to look at the first byte.
+const peekBufBytes = 64 << 10
 
 // recordError describes why a single record in a batch was rejected.
 type recordError struct {
@@ -64,7 +69,7 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 			return
 		}
 		counter := &countingReader{r: http.MaxBytesReader(w, r.Body, i.opts.MaxBodyBytes)}
-		br := bufio.NewReaderSize(counter, readBufBytes)
+		br := bufio.NewReaderSize(counter, peekBufBytes)
 		now := i.opts.Now()
 
 		var resp ingestResponse
@@ -121,18 +126,48 @@ func (i *Ingestor) Handler() http.HandlerFunc {
 				idx++
 			}
 		} else {
-			// NDJSON form (also handles a single object).
+			// NDJSON form. Lines are accumulated until they form one complete JSON
+			// value, so a pretty-printed object spanning several lines is accepted
+			// (it is valid application/json, and splitting purely on newlines
+			// rejected it as several broken fragments). A line that can never
+			// become valid is still rejected on its own, which keeps one bad
+			// record from swallowing the rest of the batch.
 			scanner := bufio.NewScanner(br)
-			scanner.Buffer(make([]byte, 0, 64*1024), readBufBytes)
+			scanner.Buffer(make([]byte, 0, 64*1024), i.opts.MaxLineBytes)
+			var pending []byte
 			idx := 0
-			for scanner.Scan() {
-				emit(idx, scanner.Bytes())
+			take := func() {
+				emit(idx, pending)
+				pending = pending[:0]
 				idx++
+			}
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				if len(pending) == 0 && len(bytes.TrimSpace(line)) == 0 {
+					continue // blank separator between records
+				}
+				pending = append(pending, line...)
+				pending = append(pending, '\n')
+				if len(pending) > i.opts.MaxLineBytes {
+					resp.Rejected++
+					resp.Errors = append(resp.Errors, recordError{Index: idx, Error: "record exceeds the line size limit"})
+					pending = pending[:0]
+					idx++
+					continue
+				}
+				// Both complete and hopeless buffers are handed to emit; emit
+				// reports the parse error per record for the latter.
+				if classifyJSON(pending) != jsonIncomplete {
+					take()
+				}
 			}
 			if serr := scanner.Err(); serr != nil {
 				i.recordUsage(key, resp.Accepted, counter.n)
 				http.Error(w, "error reading body: "+serr.Error(), readErrStatus(serr))
 				return
+			}
+			if len(bytes.TrimSpace(pending)) > 0 {
+				take() // truncated trailing value: reported as a rejected record
 			}
 		}
 
@@ -161,7 +196,7 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 
 		counter := &countingReader{r: http.MaxBytesReader(w, r.Body, i.opts.MaxBodyBytes)}
 		scanner := bufio.NewScanner(counter)
-		scanner.Buffer(make([]byte, 0, 64*1024), readBufBytes)
+		scanner.Buffer(make([]byte, 0, 64*1024), i.opts.MaxLineBytes)
 
 		var resp ingestResponse
 		overflow := false
@@ -194,6 +229,37 @@ func (i *Ingestor) RawHandler() http.HandlerFunc {
 			status = http.StatusTooManyRequests
 		}
 		writeJSON(w, status, resp)
+	}
+}
+
+// jsonState classifies a partially accumulated record.
+type jsonState int
+
+const (
+	jsonComplete   jsonState = iota // exactly one JSON value, nothing trailing
+	jsonIncomplete                  // a valid prefix; more lines are needed
+	jsonInvalid                     // cannot become a single valid value
+)
+
+// classifyJSON distinguishes "still arriving" from "broken". That distinction is
+// what lets multi-line records be reassembled without a malformed line
+// swallowing everything after it: only a genuinely truncated value keeps
+// accumulating. A buffer holding more than one value (two records jammed onto
+// one line, or trailing garbage) counts as invalid, matching how a whole-line
+// unmarshal used to treat it.
+func classifyJSON(b []byte) jsonState {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	var raw json.RawMessage
+	switch err := dec.Decode(&raw); {
+	case err == nil:
+		if _, terr := dec.Token(); terr == io.EOF {
+			return jsonComplete
+		}
+		return jsonInvalid
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return jsonIncomplete
+	default:
+		return jsonInvalid
 	}
 }
 

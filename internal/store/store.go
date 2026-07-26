@@ -70,7 +70,10 @@ type Store interface {
 	// search limit). q.Limit is ignored; q.From/To/filters/cursor are honored.
 	Stream(ctx context.Context, q query.Query, fn func(model.LogEvent) error) error
 	// Stats returns the time-bucketed histogram (bucket width q.Interval) and the
-	// level/service facets for the events matching q.
+	// level/service facets for the events matching q. Its counts are always
+	// exact: bucketing and faceting have to visit every matching row, so unlike
+	// Search this cannot stop early, and a broad query is correspondingly
+	// expensive.
 	Stats(ctx context.Context, q query.Query) (StatsResult, error)
 	// Purge deletes events with event time strictly older than olderThan
 	// (including their full-text entries) and returns how many were removed.

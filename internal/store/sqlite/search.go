@@ -380,6 +380,13 @@ func scanEvent(rows *sql.Rows) (model.LogEvent, error) {
 }
 
 // Stats computes the histogram and level/service facets for a query.
+//
+// Unlike Search, this is NOT bounded by MaxExactCount and cannot be: every
+// matching row has to be visited to be placed in a time bucket, and the facet
+// counts are exact by definition. readTimeout is the only ceiling on a broad
+// query here, so on a large database Stats is the expensive half of a UI search
+// (the web UI issues it in parallel with every /search call). StatsResult.Total
+// is therefore always exact, never capped.
 func (d *DB) Stats(ctx context.Context, q query.Query) (store.StatsResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
