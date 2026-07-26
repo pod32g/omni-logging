@@ -38,6 +38,13 @@ type Config struct {
 	SyslogUDPAddr string `yaml:"syslog_udp_addr"`
 	SyslogTCPAddr string `yaml:"syslog_tcp_addr"`
 
+	// OTLP gRPC receiver. Empty = disabled; ":4317" is the conventional port.
+	// It is a second listener rather than a route on the main server because
+	// gRPC requires HTTP/2, which the main server only speaks when TLS is on.
+	// Ingest keys apply here exactly as they do to /v1/logs, so enabling this
+	// does not open an unauthenticated way in.
+	OTLPGRPCAddr string `yaml:"otlp_grpc_addr"`
+
 	// Admission control (per ingest key). Zero = disabled.
 	RateLimitPerSec  float64 `yaml:"rate_limit_per_sec"` // request token refill/sec per key
 	RateBurst        int     `yaml:"rate_burst"`         // token-bucket capacity
@@ -117,6 +124,9 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("OMNILOG_SYSLOG_TCP_ADDR"); v != "" {
 		c.SyslogTCPAddr = v
+	}
+	if v := os.Getenv("OMNILOG_OTLP_GRPC_ADDR"); v != "" {
+		c.OTLPGRPCAddr = v
 	}
 	if v := os.Getenv("OMNILOG_HSTS"); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {

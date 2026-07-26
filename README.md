@@ -8,7 +8,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 ## Features (v1)
 
 - **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs, optionally gzip/deflate compressed.
-- **OTLP receiver** — OpenTelemetry logs over OTLP/HTTP at `/v1/logs`, in both the protobuf and JSON encodings, so an OTel SDK or Collector can point straight at it.
+- **OTLP receiver** — OpenTelemetry logs over **both** transports: OTLP/HTTP at `/v1/logs` (protobuf and JSON encodings) and OTLP/gRPC on an optional `:4317` listener, so an OTel SDK or Collector can point straight at it either way. The gRPC service is implemented directly on HTTP/2 rather than via `grpc-go`, keeping the dependency tree small.
 - **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
 - **Parsing pipelines** — ordered grok/regex/timestamp stages applied at ingest, turning unstructured text into searchable fields. Scoped with the ordinary query language, editable at runtime, testable against a sample line before you save.
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
@@ -133,7 +133,7 @@ Single Go binary, packages under `internal/`:
 | `pipeline` | Grok/regex extraction, timestamp parsing, ingest-time transforms |
 | `alert` | Rule evaluation, scheduling and notification delivery |
 | `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
-| `otlp` | OpenTelemetry logs receiver (hand-rolled protobuf + JSON) |
+| `otlp` | OpenTelemetry logs receiver: HTTP (protobuf + JSON) and gRPC, both hand-rolled |
 
 The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
 project builds with a single `go build` — no Node toolchain required. See the
@@ -287,15 +287,12 @@ than failing later on bytes the parser cannot read.
 > compressed bytes is not a memory bound: a few kilobytes of gzip can expand to
 > gigabytes, so the limit has to apply to what comes out.
 
-**On gRPC.** The roadmap pairs compression with a gRPC ingest transport. That
-half is deliberately not built: `grpc-go` plus protobuf is a large dependency
-tree for a project that hand-writes its metrics registry and its OTLP protobuf
-decoder to avoid exactly that, and the throughput argument is largely answered
-by compression plus the OTLP/HTTP receiver, which is the transport modern
-agents use anyway. If you want gRPC, it is a deliberate trade — not an
-oversight.
-
 ## OpenTelemetry (OTLP)
+
+Both OTLP transports are supported: **HTTP** on the main port and **gRPC** on
+its own.
+
+### OTLP/HTTP
 
 `/v1/logs` is the standard OTLP/HTTP path, so pointing an SDK or Collector at
 the server needs no special configuration:
@@ -308,6 +305,41 @@ export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=devkey"
 Both the **protobuf** and **JSON** encodings are accepted, gzipped or not. An
 unrecognised `Content-Type` is treated as protobuf, since that is what
 exporters default to and some omit the header.
+
+### OTLP/gRPC
+
+Off by default. Give it an address and it listens on the conventional port:
+
+```sh
+omnilog serve --otlp-grpc :4317          # or OMNILOG_OTLP_GRPC_ADDR=:4317
+```
+
+```sh
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://HOST:4317
+export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=devkey"
+```
+
+It is a second listener rather than a route on the main server because gRPC
+requires HTTP/2, and the main server only speaks HTTP/2 when TLS is configured.
+The gRPC port serves **h2c** (cleartext HTTP/2), which is what a collector's
+`insecure` channel expects, so it works without certificates. Per-message
+`gzip` is accepted and advertised via `grpc-accept-encoding`.
+
+**Ingest keys apply here exactly as they do to `/v1/logs`** — sent as gRPC
+metadata, either `x-api-key` or `authorization: Bearer`. Turning this listener
+on cannot open an unauthenticated way in past keys you have already configured.
+Keys are read live, so one added in the UI takes effect without a restart.
+
+> **This is real gRPC, without `grpc-go`.** gRPC is HTTP/2 plus three
+> conventions: a `/package.Service/Method` path, messages prefixed with a
+> compression flag and a big-endian length, and the call's outcome in HTTP
+> trailers rather than the HTTP status. Since this package already decodes OTLP
+> protobuf by hand, implementing those directly costs two modules
+> (`golang.org/x/net`, `golang.org/x/text`) where `grpc-go` would have cost
+> twelve. The test suite verifies the wire format with a real HTTP/2 client,
+> and it is checked against a stock `grpc-go` + upstream-OTLP client, which
+> connects without knowing the difference.
 
 Mapping: `service.name` and `host.name` resource attributes become the event's
 service and source, the OTLP severity number becomes the level (falling back to

@@ -69,3 +69,34 @@ func TestTLSEnabled(t *testing.T) {
 		t.Error("cert+key should enable TLS")
 	}
 }
+
+// TestOTLPGRPCAddrLayers checks the receiver's listen address flows through the
+// same file/env layering as everything else, and stays off unless asked for —
+// an ingest port that appeared by default would be a surprise.
+func TestOTLPGRPCAddrLayers(t *testing.T) {
+	if Default().OTLPGRPCAddr != "" {
+		t.Error("the OTLP gRPC listener must be off by default")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omni.yaml")
+	if err := os.WriteFile(path, []byte("otlp_grpc_addr: \":4317\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTLPGRPCAddr != ":4317" {
+		t.Errorf("OTLPGRPCAddr = %q, want :4317 from the file", cfg.OTLPGRPCAddr)
+	}
+
+	t.Setenv("OMNILOG_OTLP_GRPC_ADDR", "127.0.0.1:14317")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTLPGRPCAddr != "127.0.0.1:14317" {
+		t.Errorf("OTLPGRPCAddr = %q, want the env value to win over the file", cfg.OTLPGRPCAddr)
+	}
+}

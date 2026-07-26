@@ -30,6 +30,7 @@ import (
 	"github.com/pod32g/omni-logging/internal/forward"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/otlp"
 	"github.com/pod32g/omni-logging/internal/pipeline"
 	"github.com/pod32g/omni-logging/internal/queryclient"
 	"github.com/pod32g/omni-logging/internal/settings"
@@ -117,6 +118,7 @@ func runServe(args []string, logger *slog.Logger) error {
 		hsts       = fs.Bool("hsts", false, "send Strict-Transport-Security when TLS is on (opt-in; browsers cache it for a year)")
 		syslogUDP  = fs.String("syslog-udp", "", "listen for syslog over UDP, e.g. :514 (empty = off; unauthenticated, trusted networks only)")
 		syslogTCP  = fs.String("syslog-tcp", "", "listen for syslog over TCP, e.g. :514 (empty = off; unauthenticated, trusted networks only)")
+		otlpGRPC   = fs.String("otlp-grpc", "", "listen for OTLP over gRPC, e.g. :4317 (empty = off; ingest keys apply)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -164,6 +166,9 @@ func runServe(args []string, logger *slog.Logger) error {
 	}
 	if set["syslog-tcp"] {
 		cfg.SyslogTCPAddr = *syslogTCP
+	}
+	if set["otlp-grpc"] {
+		cfg.OTLPGRPCAddr = *otlpGRPC
 	}
 
 	store, err := sqlite.Open(cfg.DBPath)
@@ -278,6 +283,31 @@ func runServe(args []string, logger *slog.Logger) error {
 		defer sysSrv.Stop()
 		logger.Warn("syslog collector enabled; the protocol is unauthenticated, bind it to a trusted network only",
 			"udp", cfg.SyslogUDPAddr, "tcp", cfg.SyslogTCPAddr)
+	}
+
+	// OTLP over gRPC, on its own listener because gRPC needs HTTP/2 and the main
+	// server only speaks it under TLS. Records reach the same Ingestor as every
+	// other path, so they get the WAL, batching, pipelines and live tail too.
+	if cfg.OTLPGRPCAddr != "" {
+		grpcSrv, gerr := otlp.NewGRPCServer(otlp.GRPCServerOptions{
+			GRPCOptions: otlp.GRPCOptions{
+				Options: otlp.Options{Sink: ing.Enqueue, Logger: logger},
+				// Read through the settings manager rather than the static
+				// config so a key added in the UI takes effect here without a
+				// restart, exactly as it does for HTTP ingest.
+				Keys: mgr.IngestKeys,
+			},
+			Addr: cfg.OTLPGRPCAddr,
+		})
+		if gerr != nil {
+			return fmt.Errorf("otlp grpc: %w", gerr)
+		}
+		if gerr := grpcSrv.Start(); gerr != nil {
+			return fmt.Errorf("start otlp grpc: %w", gerr)
+		}
+		defer grpcSrv.Stop()
+		logger.Info("otlp grpc receiver listening", "addr", grpcSrv.Addr(),
+			"auth", len(mgr.IngestKeys()) > 0)
 	}
 
 	// Closed at the start of shutdown so live-tail streams end promptly instead

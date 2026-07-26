@@ -3,14 +3,18 @@
 This guide covers how to ship logs from your applications and containers into a
 running Omni-logging server.
 
-In **v1 there are two ingestion paths**:
+There are five ingestion paths, in rough order of fidelity:
 
-1. **Direct HTTP ingest** — your app POSTs structured JSON (best fidelity).
-2. **The file forwarder** — `omnilog forward` tails log files and ships them.
+1. **Client SDKs** — Go, Python and JavaScript, each wired into the language's
+   native logging (`slog`, `logging`, pino). See [`sdk/`](../sdk/).
+2. **Direct HTTP ingest** — your app POSTs structured JSON.
+3. **OTLP** — OpenTelemetry logs over HTTP (`/v1/logs`) or gRPC (`:4317`), for
+   anything already instrumented with OTel.
+4. **Syslog** — an optional RFC5424/RFC3164 listener over UDP and TCP, for
+   daemons and network gear that cannot be changed.
+5. **The file forwarder** — `omnilog forward` tails log files and ships them.
 
-> Native **syslog**, **OpenTelemetry/OTLP**, **Fluent/Beats** receivers and
-> language **SDKs** are not in v1 — they're on the [roadmap](../ROADMAP.md)
-> (M11–M13, M40). Until then, use HTTP ingest or the forwarder below.
+> **Fluent/Beats** receivers are still on the [roadmap](../ROADMAP.md) (M13).
 
 ---
 
@@ -22,10 +26,17 @@ In **v1 there are two ingestion paths**:
 |---|---|---|
 | `POST /api/v1/ingest` | NDJSON (one JSON object per line) or a JSON array | structured logs |
 | `POST /api/v1/ingest/raw` | `text/plain`, one log line per line | unstructured/plain text |
+| `POST /v1/logs` | OTLP protobuf or JSON | OpenTelemetry over HTTP |
+| `:4317` (separate listener) | OTLP over gRPC | OpenTelemetry over gRPC; off unless `--otlp-grpc` is set |
+
+All of these accept `Content-Encoding: gzip`; the gRPC listener accepts
+per-message `gzip` instead, negotiated the usual gRPC way.
 
 **Auth.** If the server was started with ingest keys (`--ingest-key …` or
-`OMNILOG_INGEST_KEYS`), send the key as `X-Api-Key: <key>`. If no keys are
-configured, ingest is open (fine on a trusted network).
+`OMNILOG_INGEST_KEYS`), send the key as `X-Api-Key: <key>` — including over
+gRPC, where it goes in the call metadata under the same name (or as
+`authorization: Bearer <key>`). If no keys are configured, ingest is open (fine
+on a trusted network).
 
 **The canonical event.** Each ingested record becomes a `LogEvent`. For
 structured ingest these keys (and common aliases) map onto first-class fields;
@@ -212,10 +223,11 @@ same volume.
 Docker writes stdout to `/var/lib/docker/containers/<id>/<id>-json.log`, but each
 line is wrapped (`{"log":"…","stream":"stdout","time":"…"}`). You *can* forward
 that file, but lines arrive as the raw wrapper text (searchable, not
-field-extracted). The clean fix is **4a** (post structured from the app) until
-the native **fluentd/syslog/OTLP receivers** land
-([roadmap](../ROADMAP.md) M11–M13), which will let Docker's logging drivers
-target omnilog directly.
+field-extracted). Better options, in order: post structured from the app (**4a**),
+point Docker's `syslog` logging driver at the syslog listener, or export via
+OTLP. A parsing pipeline can also unwrap the Docker envelope at ingest time if
+none of those is available. A **fluentd/Beats** receiver is still on the
+[roadmap](../ROADMAP.md) (M13).
 
 ---
 
