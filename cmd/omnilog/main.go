@@ -411,6 +411,7 @@ func runForward(args []string, logger *slog.Logger) error {
 		fromStart = fs.Bool("from-start", false, "forward existing file contents before following")
 		batch     = fs.Int("batch", 200, "max lines per request")
 		spoolDir  = fs.String("spool-dir", "", "durable spool directory: batches survive restarts and are retried until accepted (empty = best-effort, batches can be lost)")
+		compress  = fs.Bool("compress", false, "gzip each batch before sending")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -425,6 +426,7 @@ func runForward(args []string, logger *slog.Logger) error {
 		FromStart: *fromStart,
 		Batch:     *batch,
 		SpoolDir:  *spoolDir,
+		Compress:  *compress,
 		Logger:    logger,
 	})
 	if err != nil {

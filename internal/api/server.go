@@ -175,8 +175,8 @@ func (s *Server) routes() []route {
 	}
 
 	if s.ingestor != nil {
-		add("POST", "/api/v1/ingest", s.requireIngestKey(s.ingestor.Handler()), true)
-		add("POST", "/api/v1/ingest/raw", s.requireIngestKey(s.ingestor.RawHandler()), true)
+		add("POST", "/api/v1/ingest", decompressRequests(s.requireIngestKey(s.ingestor.Handler())), true)
+		add("POST", "/api/v1/ingest/raw", decompressRequests(s.requireIngestKey(s.ingestor.RawHandler())), true)
 		// /v1/logs is the path OTLP exporters expect, so an OTEL_EXPORTER_OTLP_
 		// ENDPOINT pointing at this server works with no extra configuration.
 		otlpHandler := otlp.Handler(otlp.Options{
@@ -184,7 +184,7 @@ func (s *Server) routes() []route {
 			Now:    s.now,
 			Logger: s.logger,
 		})
-		add("POST", "/v1/logs", s.requireIngestKey(otlpHandler), true)
+		add("POST", "/v1/logs", decompressRequests(s.requireIngestKey(otlpHandler)), true)
 	}
 	add("GET", "/api/v1/search", s.requireAdmin(s.handleSearch), true)
 	add("GET", "/api/v1/search/stats", s.requireAdmin(s.handleStats), true)

@@ -7,7 +7,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 
 ## Features (v1)
 
-- **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs.
+- **HTTP ingestion** — POST structured (NDJSON / JSON) or raw text logs, optionally gzip/deflate compressed.
 - **OTLP receiver** — OpenTelemetry logs over OTLP/HTTP at `/v1/logs`, in both the protobuf and JSON encodings, so an OTel SDK or Collector can point straight at it.
 - **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
 - **Parsing pipelines** — ordered grok/regex/timestamp stages applied at ingest, turning unstructured text into searchable fields. Scoped with the ordinary query language, editable at runtime, testable against a sample line before you save.
@@ -236,6 +236,36 @@ omnilog forward --server http://HOST:8080 --api-key devkey \
 The spool reuses `internal/wal` rather than introducing a second append-only
 log: CRC-checked records, torn-tail recovery, segment rotation and a checkpoint
 are exactly what "keep this until it is acknowledged" needs.
+
+## Compression
+
+Every ingest endpoint accepts a `Content-Encoding` of `gzip`, `x-gzip` or
+`deflate`, decompressed transparently before parsing. Log lines compress
+extremely well, so this is mostly free bandwidth:
+
+```sh
+gzip -c batch.ndjson | curl -XPOST http://HOST:8080/api/v1/ingest \
+  -H 'X-Api-Key: devkey' -H 'Content-Type: application/x-ndjson' \
+  -H 'Content-Encoding: gzip' --data-binary @-
+
+# the forwarder can do it for you
+omnilog forward --server http://HOST:8080 --file /var/log/app.log --compress
+```
+
+An encoding the server cannot decode is answered with `415` naming it, rather
+than failing later on bytes the parser cannot read.
+
+> Decompression is bounded at 64 MiB of **output**. A size cap on the
+> compressed bytes is not a memory bound: a few kilobytes of gzip can expand to
+> gigabytes, so the limit has to apply to what comes out.
+
+**On gRPC.** The roadmap pairs compression with a gRPC ingest transport. That
+half is deliberately not built: `grpc-go` plus protobuf is a large dependency
+tree for a project that hand-writes its metrics registry and its OTLP protobuf
+decoder to avoid exactly that, and the throughput argument is largely answered
+by compression plus the OTLP/HTTP receiver, which is the transport modern
+agents use anyway. If you want gRPC, it is a deliberate trade — not an
+oversight.
 
 ## OpenTelemetry (OTLP)
 

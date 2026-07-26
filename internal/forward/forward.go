@@ -5,6 +5,7 @@ package forward
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -43,6 +44,10 @@ type Options struct {
 	// Exposed mainly so tests do not have to wait out the production schedule.
 	RetryBackoff    time.Duration
 	RetryMaxBackoff time.Duration
+
+	// Compress gzips each batch before sending. Log lines compress extremely
+	// well, so this is mostly free bandwidth on a busy host.
+	Compress bool
 }
 
 func (o *Options) withDefaults() {
@@ -313,12 +318,27 @@ const (
 // attempt performs one POST. The batch ID goes in a header so a retry is
 // recognisable as the same batch rather than as new data.
 func (f *Forwarder) attempt(ctx context.Context, b spooledBatch) (deliveryOutcome, error) {
-	body := strings.Join(b.Lines, "\n")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.rawURL, bytes.NewReader([]byte(body)))
+	body := []byte(strings.Join(b.Lines, "\n"))
+	encoding := ""
+	if f.opts.Compress {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, werr := gz.Write(body); werr != nil {
+			return transient, werr
+		}
+		if cerr := gz.Close(); cerr != nil {
+			return transient, cerr
+		}
+		body, encoding = buf.Bytes(), "gzip"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.rawURL, bytes.NewReader(body))
 	if err != nil {
 		return transient, err
 	}
 	req.Header.Set("Content-Type", "text/plain")
+	if encoding != "" {
+		req.Header.Set("Content-Encoding", encoding)
+	}
 	if b.ID != "" {
 		req.Header.Set("X-Batch-Id", b.ID)
 	}
