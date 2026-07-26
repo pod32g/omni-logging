@@ -1,7 +1,9 @@
 package query
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,9 +24,24 @@ type Params struct {
 // Unspecified bounds are left zero (unbounded). Invalid values return an error
 // so the caller can respond with 400.
 func (p Params) Build(now time.Time) (Query, error) {
-	q, err := Parse(p.Q)
+	// Everything before the first '|' is the filter; the rest is the pipeline.
+	segments := SplitPipeline(p.Q)
+	q, err := Parse(segments[0])
 	if err != nil {
 		return Query{}, err
+	}
+	for _, stage := range segments[1:] {
+		if strings.TrimSpace(stage) == "" {
+			continue
+		}
+		if q.Agg != nil {
+			return Query{}, fmt.Errorf("only one aggregation stage is supported")
+		}
+		agg, aerr := ParseAggregation(stage)
+		if aerr != nil {
+			return Query{}, aerr
+		}
+		q.Agg = agg
 	}
 
 	if p.To != "" {

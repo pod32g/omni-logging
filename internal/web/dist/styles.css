@@ -394,3 +394,31 @@ button { font-family: inherit; cursor: pointer; }
 .set-links { font-size: 12.5px; }
 .set-links a { color: var(--cobalt); text-decoration: none; }
 .set-links a:hover { text-decoration: underline; }
+
+/* The UA stylesheet's [hidden] rule is display:none, but any author rule that
+   sets display (flex/grid on toolbars and headers) wins over it. Restate it so
+   toggling the hidden property actually hides an element. */
+[hidden] { display: none !important; }
+
+/* ---- aggregation results table (piped queries) ---- */
+.agg-wrap { overflow-x: auto; }
+table.agg { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+table.agg th, table.agg td {
+  text-align: left; padding: 0.5rem 0.9rem; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+table.agg th {
+  color: var(--muted); font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  position: sticky; top: 0; background: var(--panel);
+}
+table.agg td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.agg td.label { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+table.agg tr:hover td { background: var(--row-hover, rgba(127,150,245,0.06)); }
+/* A magnitude bar behind the first measure makes the shape readable at a glance. */
+table.agg td.num .barfill {
+  display: inline-block; height: 0.55rem; border-radius: 2px;
+  background: var(--accent, #2348E0); opacity: 0.35; margin-right: 0.5rem;
+  vertical-align: baseline;
+}
+.agg-note { padding: 0.6rem 0.9rem; }

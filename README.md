@@ -11,7 +11,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Syslog collector** — optional RFC5424/RFC3164 listener over UDP and TCP, so containers, daemons and network gear can ship logs with no agent and no code changes. Off by default.
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
-- **Aggregations** — counts-over-time histogram and field facets.
+- **Aggregations** — a piped analytics stage (`| stats count by service`, `timechart`, `top`, `rare`), plus the counts-over-time histogram and field facets.
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
@@ -78,6 +78,31 @@ The search box and the `q` parameter accept a small Splunk-like expression:
 
 Filters are AND-combined. (Cross-field OR-grouping with parentheses is planned with
 the query-language spec; `IN` covers the common same-field OR case today.)
+
+### Aggregations
+
+Append a `|` stage to turn a filter into a table. The filter half applies
+exactly as it does for a plain search, so you narrow first and aggregate second.
+
+```
+level=error | stats count by service
+| stats count, avg(attr.latency_ms), max(attr.latency_ms) by service, level
+| timechart span=5m count by level
+service=api | top 5 attr.status
+| rare source
+```
+
+- **Commands** — `stats`, `timechart` (with `span=1m`), `top [N]`, `rare [N]`
+- **Functions** — `count`, `sum(f)`, `avg(f)`, `min(f)`, `max(f)`, `dc(f)` (distinct count)
+- **Grouping** — `by a, b`; commas are optional. Fields are named exactly as in
+  filters, so `service` and `attr.user_id` mean the same thing on both sides.
+- Numeric functions coerce like the comparison operators do: non-numeric text
+  counts as `0`, matching `CAST(... AS REAL)`.
+
+Results come back from `GET /api/v1/aggregate` as `{columns, rows,
+group_columns}`, and the UI renders the same table automatically when it sees a
+`|` in the query. Groups are capped (`truncated: true` says so) so grouping by a
+high-cardinality field returns a readable table instead of a row per event.
 
 Example: `level=(error,fatal) service=checkout* attr.status>=500 timeout last=1h`
 

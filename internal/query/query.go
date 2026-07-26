@@ -68,7 +68,15 @@ type Query struct {
 	// ingest (unlike OFFSET).
 	AfterTS time.Time
 	AfterID string
+
+	// Agg is the piped aggregation stage, if the expression had one. When set,
+	// the query produces a table of grouped measures instead of events; the
+	// filter half still applies exactly as it does for a plain search.
+	Agg *Aggregation
 }
+
+// IsAggregation reports whether this query produces a table rather than events.
+func (q Query) IsAggregation() bool { return q.Agg != nil }
 
 // DefaultLimit and MaxLimit bound how many events a single search returns.
 const (
@@ -87,5 +95,8 @@ func (q *Query) Normalize() {
 	}
 	if q.Order != OrderOldest {
 		q.Order = OrderNewest
+	}
+	if q.Agg != nil {
+		q.Agg.Normalize()
 	}
 }

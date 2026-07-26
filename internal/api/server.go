@@ -164,6 +164,7 @@ func (s *Server) routes() []route {
 	}
 	add("GET", "/api/v1/search", s.requireAdmin(s.handleSearch), true)
 	add("GET", "/api/v1/search/stats", s.requireAdmin(s.handleStats), true)
+	add("GET", "/api/v1/aggregate", s.requireAdmin(s.handleAggregate), true)
 	add("GET", "/api/v1/export", s.requireAdmin(s.handleExport), true)
 	add("GET", "/api/v1/tail", s.requireAdmin(tail.Handler(tail.Options{
 		Hub:      s.hub,

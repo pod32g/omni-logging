@@ -30,6 +30,27 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handleAggregate runs a piped aggregation and returns a table.
+func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
+	q, err := s.buildQuery(r)
+	if err != nil {
+		http.Error(w, "invalid query: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !q.IsAggregation() {
+		http.Error(w, "query has no aggregation stage; add one, e.g. '| stats count by service'", http.StatusBadRequest)
+		return
+	}
+	res, err := s.store.Aggregate(r.Context(), q)
+	if err != nil {
+		s.logger.Error("aggregate failed", "error", err)
+		http.Error(w, "aggregate failed", http.StatusInternalServerError)
+		return
+	}
+	s.queryDur.With("aggregate").Observe(float64(res.TookMs) / 1000)
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleStats returns the histogram and facets for a query.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	q, err := s.buildQuery(r)

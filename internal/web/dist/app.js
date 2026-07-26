@@ -101,7 +101,23 @@ function buildSearchURL(base) {
   return base + "?" + p.toString();
 }
 
+// hasPipeline reports whether the query carries an aggregation stage. A '|'
+// inside quotes belongs to a value, so it is skipped — the same rule the server
+// applies when it splits the expression.
+function hasPipeline(q) {
+  let inQuote = false;
+  for (const ch of q) {
+    if (ch === '"') inQuote = !inQuote;
+    else if (ch === "|" && !inQuote) return true;
+  }
+  return false;
+}
+
 async function runSearch() {
+  const expr = $("#q").value.trim();
+  if (hasPipeline(expr)) return runAggregation();
+
+  showAggregation(false);
   try {
     searchBase = buildSearchURL("/api/v1/search");
     const [res, stats] = await Promise.all([
@@ -114,6 +130,112 @@ async function runSearch() {
     if (e.message !== "unauthorized") console.error(e);
   }
 }
+
+// showAggregation swaps the results pane between the event list and the table.
+// The event-list chrome goes with it: an aggregation has no timestamp/level
+// columns, no sort order, and its rows are not the events the export buttons
+// would download — leaving them visible would promise something untrue.
+function showAggregation(on) {
+  $("#agg-wrap").hidden = !on;
+  $("#agg-note").hidden = true;
+  rowsEl.hidden = on;
+  $("#col-header").hidden = on;
+  $("#export-ndjson").hidden = on;
+  $("#export-csv").hidden = on;
+  $("#order-chip").hidden = on;
+  $("#load-more").hidden = on || !searchCursor;
+  if (on) $("#search-empty").hidden = true;
+}
+
+async function runAggregation() {
+  showAggregation(true);
+  try {
+    // The histogram still describes the filter half, so it stays useful.
+    const [res, stats] = await Promise.all([
+      api(buildSearchURL("/api/v1/aggregate")),
+      api(buildSearchURL("/api/v1/search/stats") + "&interval=" + bucketFor($("#range").value)),
+    ]);
+    renderAggregation(res);
+    renderStats(stats);
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      console.error(e);
+      renderAggError(e.message);
+    }
+  }
+}
+
+function renderAggError(msg) {
+  $("#agg-table").replaceChildren();
+  const note = $("#agg-note");
+  note.textContent = msg;
+  note.hidden = false;
+  $("#match-count").textContent = "query error";
+  $("#match-sub").textContent = "";
+}
+
+// fmtCell renders one aggregation value: timestamps as local time, numbers
+// grouped, everything else as text.
+function fmtCell(v) {
+  if (v == null || v === "") return "—";
+  if (typeof v === "number") return Number.isInteger(v) ? fmtNum(v) : v.toFixed(2);
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+    const d = new Date(v);
+    if (!isNaN(d)) return fmtTs(v);
+  }
+  return String(v);
+}
+
+function renderAggregation(res) {
+  const cols = res.columns || [];
+  const rows = res.rows || [];
+  const table = $("#agg-table");
+  table.replaceChildren();
+
+  const head = el("tr");
+  cols.forEach((c) => head.appendChild(el("th", null, c)));
+  table.appendChild(head);
+
+  // The server states where the measures start, so a null measure cannot be
+  // mistaken for a group label.
+  const firstMeasure = res.group_columns || 0;
+  let max = 0;
+  rows.forEach((r) => {
+    const v = r[firstMeasure];
+    if (typeof v === "number" && v > max) max = v;
+  });
+
+  rows.forEach((r) => {
+    const tr = el("tr");
+    r.forEach((v, i) => {
+      const isNum = typeof v === "number";
+      const td = el("td", isNum ? "num" : "label");
+      if (isNum && i === firstMeasure && max > 0) {
+        const bar = el("span", "barfill");
+        bar.style.width = Math.max(2, Math.round((v / max) * 60)) + "px";
+        td.appendChild(bar);
+      }
+      td.appendChild(document.createTextNode(fmtCell(v)));
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+
+  $("#match-count").textContent = fmtNum(rows.length) + (rows.length === 1 ? " row" : " rows");
+  $("#match-sub").textContent = `${res.took_ms || 0}ms`;
+
+  const note = $("#agg-note");
+  if (res.truncated) {
+    note.textContent = "Showing the largest groups only — more groups matched than can be returned. Narrow the query or group by a lower-cardinality field.";
+    note.hidden = false;
+  } else if (!rows.length) {
+    note.textContent = "No matching events in this time range.";
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
 
 // loadMore appends the next keyset page to the current results.
 async function loadMore() {

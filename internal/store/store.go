@@ -45,6 +45,22 @@ type StatsResult struct {
 	TookMs    int64              `json:"took_ms"`
 }
 
+// AggResult is a table of grouped measures produced by a piped aggregation.
+// It is deliberately generic — column names plus rows of values — so stats,
+// timechart, top and rare all share one shape and one renderer.
+type AggResult struct {
+	Columns []string `json:"columns"`
+	Rows    [][]any  `json:"rows"`
+	// GroupColumns is how many leading columns are group labels; the rest are
+	// measures. Stated rather than inferred from value types, because a measure
+	// over an empty group is null and would otherwise look like a label.
+	GroupColumns int `json:"group_columns"`
+	// Truncated reports that more groups matched than were returned (see
+	// query.MaxGroups), so the table is a partial view.
+	Truncated bool  `json:"truncated,omitempty"`
+	TookMs    int64 `json:"took_ms"`
+}
+
 // Store persists and queries log events. Implementations must honor the
 // contract below (enforced by the backend-agnostic suite in
 // internal/store/storetest) so the rest of the system can treat any backend
@@ -75,6 +91,11 @@ type Store interface {
 	// Search this cannot stop early, and a broad query is correspondingly
 	// expensive.
 	Stats(ctx context.Context, q query.Query) (StatsResult, error)
+	// Aggregate runs the query's piped aggregation stage and returns a table of
+	// grouped measures. The filter half of the query applies exactly as it does
+	// for Search. It is an error to call this with a query that has no
+	// aggregation stage.
+	Aggregate(ctx context.Context, q query.Query) (AggResult, error)
 	// Purge deletes events with event time strictly older than olderThan
 	// (including their full-text entries) and returns how many were removed.
 	Purge(ctx context.Context, olderThan time.Time) (int64, error)

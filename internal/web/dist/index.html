@@ -100,13 +100,15 @@
           </div>
         </div>
 
-        <div class="col-header">
+        <div class="col-header" id="col-header">
           <span class="c-ts">TIMESTAMP</span>
           <span class="c-level">LEVEL</span>
           <span class="c-svc">SERVICE</span>
           <span class="c-msg">MESSAGE</span>
         </div>
         <div class="rows" id="rows"></div>
+        <div class="agg-wrap" id="agg-wrap" hidden><table class="agg" id="agg-table"></table></div>
+        <div class="hint agg-note" id="agg-note" hidden></div>
         <button class="load-more" id="load-more" hidden>Load more</button>
         <div class="empty" id="search-empty" hidden>No matching events. Adjust your query or time range.</div>
       </div>
