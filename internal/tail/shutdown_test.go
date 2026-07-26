@@ -16,7 +16,7 @@ import (
 func TestHandlerEndsOnClosing(t *testing.T) {
 	hub := NewHub()
 	closing := make(chan struct{})
-	h := Handler(hub, time.Now, closing)
+	h := Handler(Options{Hub: hub, Now: time.Now, Closing: closing})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tail", nil)
@@ -55,7 +55,7 @@ func TestHandlerEndsOnClosing(t *testing.T) {
 // that do not wire the signal keep their previous behaviour.
 func TestHandlerWithNilClosing(t *testing.T) {
 	hub := NewHub()
-	h := Handler(hub, time.Now, nil)
+	h := Handler(Options{Hub: hub, Now: time.Now})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tail", nil)
 	ctx, cancel := context.WithCancel(req.Context())

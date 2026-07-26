@@ -199,10 +199,14 @@ func jsonPath(key string) string {
 
 // ftsMatchExpr builds an FTS5 MATCH expression that ANDs all terms together.
 // Each term is wrapped as a quoted string so phrases and punctuation are safe.
+// A trailing '*' makes the final token of each phrase a prefix match, so typing
+// "conn" finds "connection". Whole-token-only matching reads as broken to
+// anyone typing into a search box — they get nothing until the word is complete
+// — and the in-memory matcher mirrors this (see query.containsTokens).
 func ftsMatchExpr(terms []string) string {
 	parts := make([]string, len(terms))
 	for i, t := range terms {
-		parts[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"`
+		parts[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"*`
 	}
 	return strings.Join(parts, " AND ")
 }

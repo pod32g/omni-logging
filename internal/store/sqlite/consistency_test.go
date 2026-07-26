@@ -38,6 +38,10 @@ func TestFreeTextAgreesWithLiveTail(t *testing.T) {
 		"connection", "refused", "connection refused", "refused connection",
 		"error", "err", "erroneous", "request", "checkout", "api",
 		"timeout", "500", "region", "eu", "west", "host", "nonexistent",
+		// Prefixes: the store appends '*' to each FTS phrase and the matcher
+		// treats the final token as a prefix, so these must agree too.
+		"conn", "refus", "check", "time", "req", "erro", "5", "hos", "nonexist",
+		"connection refu", "conn refused", "nnection", "efused",
 	}
 
 	for _, term := range terms {

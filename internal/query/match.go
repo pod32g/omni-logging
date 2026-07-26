@@ -270,19 +270,25 @@ func ftsTokenize(s string) []string {
 
 // containsTokens reports whether want appears as a contiguous run inside have,
 // which is how FTS5 evaluates a quoted multi-word phrase.
+// The last token matches as a prefix, mirroring the trailing '*' the store
+// appends to each FTS5 phrase: a partly-typed word ("conn") has to find
+// "connection", or a live-tail filter goes silent until the word is finished.
+// Only the final token is a prefix — earlier tokens of a phrase must match in
+// full, which is exactly how FTS5 evaluates `"a b"*`.
 func containsTokens(have, want []string) bool {
 	if len(want) > len(have) {
 		return false
 	}
+	last := len(want) - 1
 	for i := 0; i+len(want) <= len(have); i++ {
 		match := true
-		for j, wt := range want {
-			if have[i+j] != wt {
+		for j := 0; j < last; j++ {
+			if have[i+j] != want[j] {
 				match = false
 				break
 			}
 		}
-		if match {
+		if match && strings.HasPrefix(have[i+last], want[last]) {
 			return true
 		}
 	}

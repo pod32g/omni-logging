@@ -11,7 +11,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — counts-over-time histogram and field facets.
-- **Live tail** — real-time streaming of matching events (SSE).
+- **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server.
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
@@ -63,7 +63,7 @@ omnilog forward --server http://HOST:8080 --api-key devkey --service api --file 
 
 The search box and the `q` parameter accept a small Splunk-like expression:
 
-- **Free text** — `timeout payments` (AND-combined, full-text via FTS5)
+- **Free text** — `timeout payments` (AND-combined, full-text via FTS5). Terms match **whole tokens, with the last one as a prefix**: `conn` finds `connection`, but `nnection` finds nothing. In a quoted phrase only the final token is a prefix (`"connection refu"` matches, `"conn refused"` does not).
 - **Field filters** — `level=error service=checkout-api source=node-1 message=…` (also `raw`)
 - **Attribute filters** — `attr.user_id=42` (or bare `user_id=42`)
 - **Negation** — `level!=debug`

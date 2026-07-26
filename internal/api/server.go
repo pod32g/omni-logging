@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"github.com/pod32g/omni-logging/internal/config"
 	"github.com/pod32g/omni-logging/internal/ingest"
 	"github.com/pod32g/omni-logging/internal/metrics"
+	"github.com/pod32g/omni-logging/internal/model"
+	"github.com/pod32g/omni-logging/internal/query"
 	"github.com/pod32g/omni-logging/internal/settings"
 	"github.com/pod32g/omni-logging/internal/store"
 	"github.com/pod32g/omni-logging/internal/tail"
@@ -117,6 +120,24 @@ func (s *Server) registerMetrics(version string) {
 	}
 }
 
+// backfill seeds a new live-tail stream with the most recent matching events,
+// so opening the tail on a quiet system shows recent history instead of an
+// empty pane. It runs on the store's read pool, so it cannot delay ingestion.
+func (s *Server) backfill(ctx context.Context, q query.Query, limit int) ([]model.LogEvent, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	q.Limit = limit
+	q.Order = query.OrderNewest
+	q.AfterTS, q.AfterID = time.Time{}, "" // history is independent of any cursor
+	res, err := s.store.Search(ctx, q)
+	if err != nil {
+		s.logger.Warn("live tail backfill failed", "error", err)
+		return nil, err
+	}
+	return res.Events, nil
+}
+
 // route is one registered endpoint. Handler installs these on the mux and the
 // OpenAPI conformance test walks the same slice, so an endpoint cannot ship
 // without a decision about whether it belongs in the published contract.
@@ -144,7 +165,12 @@ func (s *Server) routes() []route {
 	add("GET", "/api/v1/search", s.requireAdmin(s.handleSearch), true)
 	add("GET", "/api/v1/search/stats", s.requireAdmin(s.handleStats), true)
 	add("GET", "/api/v1/export", s.requireAdmin(s.handleExport), true)
-	add("GET", "/api/v1/tail", s.requireAdmin(tail.Handler(s.hub, s.now, s.closing)), true)
+	add("GET", "/api/v1/tail", s.requireAdmin(tail.Handler(tail.Options{
+		Hub:      s.hub,
+		Now:      s.now,
+		Closing:  s.closing,
+		Backfill: s.backfill,
+	})), true)
 	add("GET", "/api/v1/healthz", http.HandlerFunc(s.handleHealth), true)
 	add("GET", "/api/v1/readyz", http.HandlerFunc(s.handleReady), true)
 	add("GET", "/api/v1/status", s.requireAdmin(s.handleStatus), true)
