@@ -216,9 +216,12 @@ func (s *Server) handleChannelTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note := alert.Notification{
-		Rule:      "Test notification",
-		RuleID:    "test",
-		State:     alert.StateFiring,
+		Rule:   "Test notification",
+		RuleID: "test",
+		// A probe, not an incident. State is left unset deliberately: an
+		// omni-notify channel turns Test into a stateless event, so pressing
+		// this cannot open an alert that nothing will ever resolve.
+		Test:      true,
 		Severity:  alert.SeverityInfo,
 		Value:     1,
 		Condition: "> 0",

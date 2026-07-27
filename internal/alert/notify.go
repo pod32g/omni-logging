@@ -14,10 +14,17 @@ import (
 
 // Notification is the payload delivered on a state transition.
 type Notification struct {
-	Rule      string     `json:"rule"`
-	RuleID    string     `json:"rule_id"`
-	State     State      `json:"state"`              // firing or ok (resolved)
-	Severity  Severity   `json:"severity,omitempty"` // how bad, independent of state
+	Rule     string   `json:"rule"`
+	RuleID   string   `json:"rule_id"`
+	State    State    `json:"state"`              // firing or ok (resolved)
+	Severity Severity `json:"severity,omitempty"` // how bad, independent of state
+
+	// Test marks a probe sent to verify a channel, rather than a real state
+	// change. It is not an incident and must not be delivered as one: see
+	// toOmniNotify, where treating a probe as "firing" left a permanently
+	// active incident that silently swallowed every later test.
+	Test bool `json:"test,omitempty"`
+
 	Value     float64    `json:"value"`
 	Condition string     `json:"condition"`
 	Query     string     `json:"query"`
@@ -30,9 +37,14 @@ type Notification struct {
 // and by any webhook consumer that would rather not parse the payload.
 func (n Notification) Text() string {
 	var b strings.Builder
-	if n.State == StateFiring {
+	switch {
+	case n.Test:
+		// A probe is neither firing nor resolved; labelling it either way puts a
+		// fake incident in the operator's chat history.
+		b.WriteString("🔔 TEST: ")
+	case n.State == StateFiring:
 		b.WriteString("🔴 FIRING: ")
-	} else {
+	default:
 		b.WriteString("✅ RESOLVED: ")
 	}
 	fmt.Fprintf(&b, "%s — %g %s over %s", n.Rule, n.Value, n.Condition, n.Window)
@@ -71,7 +83,7 @@ type omniNotifyEvent struct {
 	EventID     string            `json:"event_id"`
 	Type        string            `json:"type"`
 	Source      string            `json:"source"`
-	Status      string            `json:"status"`
+	Status      string            `json:"status,omitempty"`
 	Severity    string            `json:"severity,omitempty"`
 	Title       string            `json:"title"`
 	Summary     string            `json:"summary,omitempty"`
@@ -93,15 +105,33 @@ func toOmniNotify(note Notification) omniNotifyEvent {
 		status = "firing"
 	}
 
+	// The rule ID, not its name: a rule renamed while firing must still resolve
+	// against the event it opened.
+	eventID := note.RuleID
+
+	if note.Test {
+		// A probe has no lifecycle, so it is sent stateless — no status at all.
+		// Sending it as "firing" opened an incident that nothing would ever
+		// resolve, and Omni-Notify then correctly suppressed every later probe
+		// as a repeat of the one still active. The button reported success
+		// (the API returns 202 whether it notified or deduplicated) while
+		// delivering nothing, which is the worst of both.
+		status = ""
+		// Stateless events dedupe on the route's window instead, so give each
+		// probe its own fingerprint — pressing Test twice in a minute must
+		// deliver twice, or the button is lying again, just for five minutes
+		// rather than forever. The timestamp is the notification's own, which
+		// keeps this deterministic under an injected clock.
+		eventID = "test-" + note.At.UTC().Format(time.RFC3339Nano)
+	}
+
 	severity := string(note.Severity)
 	if severity == "" {
 		severity = string(DefaultSeverity)
 	}
 
 	e := omniNotifyEvent{
-		// The rule ID, not its name: a rule renamed while firing must still
-		// resolve against the event it opened.
-		EventID:  note.RuleID,
+		EventID:  eventID,
 		Type:     "alert",
 		Source:   omniNotifySource,
 		Status:   status,

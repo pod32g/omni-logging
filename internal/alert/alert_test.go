@@ -607,3 +607,97 @@ func TestEvaluateRejectsBadTimeInQuery(t *testing.T) {
 		t.Fatal("an unparseable time bound in a rule query must be an error")
 	}
 }
+
+// --- channel test probes ----------------------------------------------------
+
+// TestOmniNotifyProbeIsStateless is the regression test for a button that lied.
+// The channel test used to be sent as status=firing with a fixed event_id, so
+// Omni-Notify opened an incident nothing would ever resolve and then correctly
+// suppressed every later probe as a repeat of the one still active — while the
+// API kept returning 202, so the UI reported success and delivered nothing.
+func TestOmniNotifyProbeIsStateless(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+
+	note := omniNote(StateFiring)
+	note.Test = true
+	if err := NewNotifier(nil).Send(context.Background(), ch, note); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := rec.last()
+	if status, present := ev["status"]; present {
+		t.Errorf("a probe carried status=%v; it must be stateless, or it opens an incident that never resolves", status)
+	}
+	if ev["type"] != "alert" || ev["source"] != "omni-logging" {
+		t.Errorf("routing fields should be unchanged: %#v", ev)
+	}
+}
+
+// TestOmniNotifyProbesAreDistinct: stateless events dedupe on the route's
+// window, so two probes sharing a fingerprint would collapse into one delivery.
+// Pressing Test twice must send twice.
+func TestOmniNotifyProbesAreDistinct(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+	n := NewNotifier(nil)
+
+	first := omniNote(StateFiring)
+	first.Test = true
+	if err := n.Send(context.Background(), ch, first); err != nil {
+		t.Fatal(err)
+	}
+	firstID := rec.last()["event_id"]
+
+	second := first
+	second.At = first.At.Add(time.Second) // a later press
+	if err := n.Send(context.Background(), ch, second); err != nil {
+		t.Fatal(err)
+	}
+	secondID := rec.last()["event_id"]
+
+	if firstID == secondID {
+		t.Errorf("both probes used event_id %v, so the second would be deduped away", firstID)
+	}
+	if !strings.HasPrefix(firstID.(string), "test-") {
+		t.Errorf("probe event_id = %v, want a test- prefix so it is recognisable", firstID)
+	}
+}
+
+// TestRealAlertsKeepTheirLifecycle: the probe change must not leak into real
+// notifications, which depend on firing/resolved pairing to clear.
+func TestRealAlertsKeepTheirLifecycle(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+	n := NewNotifier(nil)
+
+	if err := n.Send(context.Background(), ch, omniNote(StateFiring)); err != nil {
+		t.Fatal(err)
+	}
+	firing := rec.last()
+	if firing["status"] != "firing" || firing["event_id"] != "rule-123" {
+		t.Errorf("a real alert must still be a stateful incident keyed by rule ID: %#v", firing)
+	}
+
+	if err := n.Send(context.Background(), ch, omniNote(StateOK)); err != nil {
+		t.Fatal(err)
+	}
+	resolved := rec.last()
+	if resolved["status"] != "resolved" || resolved["event_id"] != firing["event_id"] {
+		t.Errorf("the resolve must pair with the firing: %#v", resolved)
+	}
+}
+
+// TestProbeTextIsNotAnIncident: a probe rendered as FIRING or RESOLVED puts a
+// fake incident in the operator's chat history.
+func TestProbeTextIsNotAnIncident(t *testing.T) {
+	note := omniNote(StateFiring)
+	note.Test = true
+	got := note.Text()
+	if strings.Contains(got, "FIRING") || strings.Contains(got, "RESOLVED") {
+		t.Errorf("probe text reads as an incident: %q", got)
+	}
+	if !strings.Contains(got, "TEST") {
+		t.Errorf("probe text should say it is a test: %q", got)
+	}
+}

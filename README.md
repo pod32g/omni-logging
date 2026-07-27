@@ -492,6 +492,12 @@ Each transition becomes one Omni-Notify event:
 Route them on the Omni-Notify side with `source: omni-logging`, or by
 `severity`, or per-rule with `labels.rule`.
 
+The **Test** button on a channel sends a *stateless* event instead — no
+`status`, and a fresh `event_id` each press. A probe is not an incident: sent
+as `firing` it would open one that nothing ever resolves, after which
+Omni-Notify suppresses every later probe as a repeat while the API still
+answers `202` — a button reporting success and delivering nothing.
+
 > **Why labels carry nothing but identity.** Omni-Notify's dedup key is
 > `sha256(type | source | event_id | sorted labels)`. If a label held the
 > observed value or which groups broke, the resolved event would fingerprint
