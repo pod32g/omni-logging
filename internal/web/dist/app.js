@@ -454,32 +454,116 @@ function fillBuckets(hist) {
   return out;
 }
 
-let histBuckets = [];  // the rendered buckets, so the brush can map x -> time
-
-function renderBars(rawHist, host, keep) {
-  const hist = fillBuckets(rawHist);
-  const bars = host || $("#bars");
-  bars.replaceChildren();
-  const max = Math.max(1, ...hist.map((b) => b.count));
-  hist.forEach((b) => {
-    const bar = el("div", "bar");
-    const norm = el("div", "norm");
-    // Percentage, not pixels: a bar is bounded by its container by construction.
-    // This was a pixel constant that had to be kept in step with the .bars
-    // height in CSS, and when the CSS shrank to 46px the 62px bars overflowed
-    // upward and collided with the header above them.
-    norm.style.height = (b.count > 0 ? Math.max(4, Math.round((b.count / max) * 100)) : 0) + "%";
-    bar.title = `${fmtTs(b.start)} · ${fmtNum(b.count)} events`;
-    bar.appendChild(norm);
-    bars.appendChild(bar);
-  });
-  if (keep !== false) histBuckets = hist;
-  return hist;
+// ---------- histogram, on uPlot ----------
+// The chart is a library's job. The previous hand-rolled version sized bars in
+// pixels that had to be kept in step with a height in the stylesheet; when the
+// two drifted, bars overflowed and painted across the header. uPlot owns the
+// scale, so that class of bug is gone, and drag-to-select comes with it instead
+// of being hand-computed from mouse coordinates.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-// The sidebar of facet bars is gone; counts live inline above the results as
-// toggle chips. Same information, a fraction of the space, and the results get
-// the full width — which is what you are actually here to read.
+// makeHist mounts a bar chart into el. onSelect receives the dragged range.
+function makeHist(el, onSelect, onHover) {
+  let u = null;
+  let data = [[], []];
+
+  function build() {
+    if (u) { u.destroy(); u = null; }
+    const bar = cssVar("--info-line") || "#888";
+    const width = el.clientWidth || 600;
+    const height = el.clientHeight || 52;
+
+    u = new uPlot({
+      width, height,
+      padding: [4, 0, 0, 0],
+      legend: { show: false },
+      cursor: {
+        // setScale:false means a drag selects without zooming the chart: the
+        // selection is handed to the query instead, which is where the range
+        // actually lives.
+        drag: { x: true, y: false, setScale: false },
+        points: { show: false },
+      },
+      scales: { x: { time: true }, y: { range: (_u, _min, max) => [0, Math.max(1, max)] } },
+      axes: [{ show: false }, { show: false }],
+      series: [
+        {},
+        {
+          paths: uPlot.paths.bars({ size: [0.92, Infinity], align: 1 }),
+          fill: bar, stroke: bar, width: 0, points: { show: false },
+        },
+      ],
+      hooks: {
+        setSelect: [(self) => {
+          if (self.select.width <= 2) return;
+          const a = self.posToVal(self.select.left, "x");
+          const b = self.posToVal(self.select.left + self.select.width, "x");
+          self.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+          if (onSelect) onSelect(new Date(a * 1000), new Date(b * 1000));
+        }],
+        setCursor: [(self) => {
+          if (!onHover) return;
+          const i = self.cursor.idx;
+          if (i == null || !data[0][i]) { onHover(null); return; }
+          onHover({ t: new Date(data[0][i] * 1000), count: data[1][i] || 0 });
+        }],
+      },
+    }, data, el);
+  }
+
+  // uPlot needs an explicit pixel size, so it has to be told when the container
+  // changes — including when a hidden view becomes visible and finally has one.
+  const ro = new ResizeObserver(() => {
+    if (!u || !el.clientWidth) return;
+    u.setSize({ width: el.clientWidth, height: el.clientHeight });
+  });
+  ro.observe(el);
+
+  return {
+    setData(hist) {
+      const filled = fillBuckets(hist || []);
+      data = [
+        filled.map((b) => Math.floor(new Date(b.start).getTime() / 1000)),
+        filled.map((b) => b.count),
+      ];
+      if (!u) build();
+      u.setData(data);
+      if (el.clientWidth) u.setSize({ width: el.clientWidth, height: el.clientHeight });
+      return filled;
+    },
+    // Colours are baked into uPlot options at construction, so a theme change
+    // means rebuilding rather than restyling.
+    rebuild() { if (u) { build(); u.setData(data); } },
+    hasData() { return data[0].length > 0; },
+  };
+}
+
+let searchHist = null, dashHist = null;
+
+function ensureCharts() {
+  if (!searchHist) {
+    searchHist = makeHist($("#bars-wrap"), setQueryRange, (pt) => {
+      const sub = $("#hist-sub");
+      sub.textContent = pt ? `${fmtClock(pt.t.toISOString())} · ${fmtNum(pt.count)} events` : "";
+    });
+  }
+  if (!dashHist) {
+    // Dragging the overview chart is a shortcut into Search for that window.
+    dashHist = makeHist($("#dash-bars"), (from, to) => {
+      navTo("search");
+      setQueryRange(from, to);
+    }, null);
+  }
+}
+
+function renderBars(rawHist, which) {
+  ensureCharts();
+  const chart = which === "dash" ? dashHist : searchHist;
+  return chart.setData(rawHist);
+}
+
 function renderFacets(facets) {
   const levelsEl = $("#facet-levels");
   levelsEl.replaceChildren();
@@ -608,6 +692,9 @@ function setTheme(t) {
   try { localStorage.setItem("omnilog_theme", t); } catch (e) { /* ignore */ }
   $("#theme-toggle").title = "Theme: " + t + " (click to change)";
   reflectThemeSeg();
+  // The chart's colours were resolved from CSS variables when it was built.
+  if (searchHist) searchHist.rebuild();
+  if (dashHist) dashHist.rebuild();
 }
 function reflectThemeSeg() {
   const cur = currentTheme();
@@ -1006,56 +1093,6 @@ $("#al-dryrun").addEventListener("click", dryRunRule);
 $("#al-chan-add").addEventListener("click", addChannel);
 
 
-// ---------- histogram brush: drag to narrow the time range ----------
-// Dragging writes from=/to= into the query rather than holding a hidden bit of
-// state, so the selected window is visible, editable and shareable as a URL —
-// and the query's own bounds beat the range picker server-side.
-(function initBrush() {
-  const wrap = $("#bars-wrap");
-  if (!wrap) return;
-  let startX = null, box = null;
-
-  const xToTime = (x) => {
-    if (!histBuckets.length) return null;
-    const r = wrap.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (x - r.left) / r.width));
-    const i = Math.min(histBuckets.length - 1, Math.floor(frac * histBuckets.length));
-    return new Date(histBuckets[i].start).getTime();
-  };
-  const step = () => {
-    if (histBuckets.length < 2) return 60000;
-    return new Date(histBuckets[1].start).getTime() - new Date(histBuckets[0].start).getTime();
-  };
-
-  wrap.addEventListener("mousedown", (e) => {
-    if (!histBuckets.length) return;
-    startX = e.clientX;
-    box = el("div", "brush");
-    wrap.appendChild(box);
-    e.preventDefault();
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (startX == null || !box) return;
-    const r = wrap.getBoundingClientRect();
-    const a = Math.max(r.left, Math.min(startX, e.clientX));
-    const b = Math.min(r.right, Math.max(startX, e.clientX));
-    box.style.left = (a - r.left) + "px";
-    box.style.width = (b - a) + "px";
-  });
-  window.addEventListener("mouseup", (e) => {
-    if (startX == null) return;
-    const moved = Math.abs(e.clientX - startX);
-    const from = xToTime(Math.min(startX, e.clientX));
-    const to = xToTime(Math.max(startX, e.clientX));
-    if (box) { box.remove(); box = null; }
-    startX = null;
-    // A click is not a drag: below a few pixels the user was probably just
-    // clicking, and snapping the range to one bucket would be a surprise.
-    if (moved < 4 || from == null || to == null) return;
-    setQueryRange(new Date(from), new Date(to + step()));
-  });
-})();
-
 // setQueryRange rewrites the query's time bounds, dropping whatever was there.
 function setQueryRange(from, to) {
   const q = $("#q");
@@ -1082,7 +1119,7 @@ async function loadDash() {
       api(`/api/v1/search?q=${encodeURIComponent("level=(error,fatal)")}&last=${range}&limit=8`).catch(() => ({ events: [] })),
     ]);
     renderDashTiles(stats, alerts);
-    renderBars(stats.histogram || [], $("#dash-bars"), false);
+    renderBars(stats.histogram || [], "dash");
     const h = stats.histogram || [];
     $("#dash-hist-sub").textContent = h.length ? `${fmtClock(h[0].start)} – ${fmtClock(h[h.length - 1].start)}` : "no data";
     renderDashServices(stats.facets || {});

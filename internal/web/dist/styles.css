@@ -317,16 +317,20 @@ select { cursor: pointer; }
 
 /* Dragging across the histogram narrows the time range — the primary way to
    zoom in. It has to read as a control, so the selection gets hard edges. */
-.bars-wrap { position: relative; cursor: crosshair; user-select: none; overflow: hidden; }
-.bars { display: flex; align-items: flex-end; gap: 1px; height: 46px; overflow: hidden; }
-.bar { flex: 1 1 0; min-width: 0; display: flex; align-items: flex-end; height: 100%; }
-.bar .norm { width: 100%; background: var(--info-line); border-radius: 1px 1px 0 0; }
-.bars-wrap:hover .bar .norm { background: var(--faint); }
-.brush {
-  position: absolute; top: 0; bottom: 0; pointer-events: none;
+/* uPlot mounts. The library owns the geometry — a bar can no longer be sized
+   in units the container does not know about, which is what let the old
+   hand-rolled bars paint over their own header. */
+.chart { height: 52px; width: 100%; }
+.chart-lg { height: 104px; width: 100%; }
+.uplot, .u-wrap { width: 100% !important; }
+.u-over { cursor: crosshair; }
+/* uPlot's default selection is a translucent blue; make it the monochrome
+   selection used everywhere else, with hard edges so it reads as a control. */
+.u-select {
   background: var(--sel-strong);
   border-left: 1px solid var(--ink); border-right: 1px solid var(--ink);
 }
+.u-cursor-x, .u-cursor-y { border-color: var(--faint) !important; }
 .hist-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
 .hist-axis { font-family: var(--mono); font-size: 10px; color: var(--faint); }
 .hist-hint { font-size: 10.5px; color: var(--faint); }

@@ -149,33 +149,47 @@ func TestDarkThemeIsNeutral(t *testing.T) {
 	}
 }
 
-// TestHistogramBarsAreBoundedByTheirContainer pins the fix for a real collision:
-// bar heights were computed in app.js as a pixel constant that had to be kept in
-// step with the .bars height in styles.css. When the CSS shrank to 46px the 62px
-// bars overflowed upward and painted over the panel header — 24 overlapping
-// element pairs. Sizing in percent makes the container the only source of truth,
-// so the two files cannot disagree again.
-func TestHistogramBarsAreBoundedByTheirContainer(t *testing.T) {
-	js := readAsset(t, "app.js")
-
-	i := strings.Index(js, "norm.style.height")
-	if i < 0 {
-		t.Fatal("app.js no longer sets a bar height; update this test with the new mechanism")
+// TestHistogramUsesVendoredUPlot replaces an earlier test that pinned how bar
+// heights were computed. That whole class of bug — a pixel size in app.js
+// drifting out of step with a height in styles.css until bars painted over the
+// panel header — is gone because the chart library owns the scale now. What is
+// worth guarding instead is that the library is vendored: the UI is embedded in
+// the binary and must work air-gapped, so a CDN reference would be a silent
+// runtime dependency on the internet.
+func TestHistogramUsesVendoredUPlot(t *testing.T) {
+	html := readAsset(t, "index.html")
+	for _, want := range []string{`href="vendor/uPlot.min.css"`, `src="vendor/uPlot.min.js"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %q", want)
+		}
 	}
-	stmt := js[i:]
-	if end := strings.Index(stmt, "\n"); end >= 0 {
-		stmt = stmt[:end]
-	}
-	if !strings.Contains(stmt, `+ "%"`) {
-		t.Errorf("bar height is not relative to its container: %q", strings.TrimSpace(stmt))
-	}
-	if strings.Contains(stmt, `+ "px"`) {
-		t.Errorf("bar height is back to absolute pixels, which must track the CSS by hand: %q", strings.TrimSpace(stmt))
+	// Every script and stylesheet must be same-origin.
+	for _, bad := range []string{"//cdn.", "//unpkg.com", "//cdnjs.", "//jsdelivr", "https://esm.sh"} {
+		if strings.Contains(html, bad) {
+			t.Errorf("index.html loads an off-origin asset (%q); the UI must work air-gapped", bad)
+		}
 	}
 
-	// And the plot area clips, so nothing can paint outside it regardless.
-	css := readAsset(t, "styles.css")
-	if !strings.Contains(css, ".bars { display: flex; align-items: flex-end; gap: 1px; height: 46px; overflow: hidden; }") {
-		t.Error("styles.css: .bars must clip its contents so an oversized bar cannot escape")
+	// The vendored files must actually be embedded, not just referenced.
+	js := readAsset(t, "vendor/uPlot.min.js")
+	if len(js) < 20000 || !strings.Contains(js, "uPlot") {
+		t.Errorf("vendor/uPlot.min.js looks wrong (%d bytes)", len(js))
+	}
+	if lic := readAsset(t, "vendor/uPlot.LICENSE"); !strings.Contains(lic, "MIT") {
+		t.Error("vendor/uPlot.LICENSE missing or not the MIT text")
+	}
+	readAsset(t, "vendor/uPlot.min.css")
+
+	app := readAsset(t, "app.js")
+	if !strings.Contains(app, "new uPlot(") {
+		t.Error("app.js does not construct a uPlot chart")
+	}
+	// Selection must hand the range to the query rather than zooming the chart,
+	// which is what keeps the selected window visible and shareable.
+	if !strings.Contains(app, "setScale: false") {
+		t.Error("app.js: chart drag should select without rescaling; the range belongs in the query")
+	}
+	if strings.Contains(app, "norm.style.height") {
+		t.Error("app.js still sizes bars by hand; uPlot owns the geometry now")
 	}
 }

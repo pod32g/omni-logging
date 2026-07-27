@@ -6,6 +6,7 @@
   <title>Omni-logging</title>
   <!-- Apply the saved theme before first paint to avoid a flash of the wrong theme. -->
   <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="vendor/uPlot.min.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -69,7 +70,7 @@
           <h3>Events over time</h3>
           <span class="card-link" id="dash-hist-sub"></span>
         </div>
-        <div class="bars-wrap"><div class="bars" id="dash-bars"></div></div>
+        <div class="chart chart-lg" id="dash-bars"></div>
       </div>
 
       <div class="dash-grid">
@@ -134,12 +135,12 @@
     <div class="hist-panel" id="hist-panel">
       <div class="hist-head">
         <div class="hist-title">Events over time</div>
-        <div class="hist-sub" id="hist-sub" hidden></div>
+        <div class="hist-sub" id="hist-sub"></div>
         <div class="fb-spacer"></div>
         <div class="hist-total"><strong id="hist-count">0</strong><span id="hist-took">events</span></div>
         <button class="hist-collapse" id="hist-collapse" title="Collapse the chart">hide</button>
       </div>
-      <div class="bars-wrap" id="bars-wrap"><div class="bars" id="bars"></div></div>
+      <div class="chart" id="bars-wrap"></div>
       <div class="hist-foot">
         <span class="hist-axis" id="hist-axis-l"></span>
         <span class="hist-hint">drag to zoom a time range</span>
@@ -367,6 +368,7 @@
     </div>
   </div>
 
+  <script src="vendor/uPlot.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

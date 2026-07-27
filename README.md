@@ -145,7 +145,7 @@ Single Go binary, packages under `internal/`:
 | `tail` | In-memory pub/sub hub + SSE handler |
 | `api` | Router, auth + metrics middleware, search/stats/health/metrics handlers |
 | `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
-| `web` | Embedded single-page UI (vanilla JS/CSS, no build step) |
+| `web` | Embedded single-page UI (vanilla JS/CSS, no build step; uPlot vendored for charts) |
 | `forward` | File-tailing forwarder client (durable spool) |
 | `pipeline` | Grok/regex extraction, timestamp parsing, ingest-time transforms |
 | `alert` | Rule evaluation, scheduling and notification delivery |
@@ -153,8 +153,16 @@ Single Go binary, packages under `internal/`:
 | `otlp` | OpenTelemetry logs receiver: HTTP (protobuf + JSON) and gRPC, both hand-rolled |
 
 The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
-project builds with a single `go build` — no Node toolchain required. See the
-design spec in
+project builds with a single `go build` — no Node toolchain required. Its one
+third-party asset is [uPlot](https://github.com/leeoniya/uPlot) (MIT, ~51 KB, no
+dependencies of its own), vendored under
+[`internal/web/dist/vendor/`](internal/web/dist/vendor/) and served from the
+binary rather than a CDN, so the UI still works air-gapped. It draws the
+histograms: the chart owns its own scale, which is a class of bug worth paying a
+dependency to remove — the previous hand-rolled bars sized themselves in pixels
+that had to be kept in step with a height in the stylesheet, and when the two
+drifted the bars painted over the panel header. Go module dependencies are
+unaffected. See the design spec in
 [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
 
 ## Observability
