@@ -310,3 +310,23 @@ func TestPatternNamesIncludeTheEssentials(t *testing.T) {
 		}
 	}
 }
+
+// TestCompileRejectsTimeInMatch: a pipeline runs at ingest on one event at a
+// time, so a time range in its match expression can never do anything. Naming
+// it beats parsing it and quietly ignoring it.
+func TestCompileRejectsTimeInMatch(t *testing.T) {
+	for _, match := range []string{"level=error last=1h", "from=2026-01-01T00:00:00Z"} {
+		_, err := Compile(Spec{
+			Name:   "p",
+			Match:  match,
+			Stages: []StageSpec{{Type: "regex", Field: "message", Pattern: "(?P<a>x)"}},
+		})
+		if err == nil {
+			t.Errorf("Compile(match=%q) should be refused", match)
+			continue
+		}
+		if !strings.Contains(err.Error(), "time range") {
+			t.Errorf("error should explain the problem: %v", err)
+		}
+	}
+}

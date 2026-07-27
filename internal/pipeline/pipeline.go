@@ -93,6 +93,12 @@ func Compile(s Spec) (*Pipeline, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pipeline %q: match: %w", s.Name, err)
 		}
+		if !q.Time.IsZero() {
+			// A pipeline runs on each event as it arrives, so there is no range
+			// to narrow — the directive would be parsed and then ignored. Say so
+			// instead, for the same reason the '|' check above exists.
+			return nil, fmt.Errorf("pipeline %q: match cannot set a time range (last=/from=/to=) — a pipeline runs at ingest, on one event at a time", s.Name)
+		}
 		q.Normalize()
 		p.match = &q
 	}

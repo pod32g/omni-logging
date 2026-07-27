@@ -78,10 +78,27 @@ The search box and the `q` parameter accept a small Splunk-like expression:
 - **In set** — `level=(error,warn,fatal)`
 - **Regex** — `message=~timeout|refused` (RE2)
 - **Quoted phrases** — `"connection refused"`
-- **Time range** — `last=15m` (`s/m/h/d`) or absolute `from`/`to` (RFC3339 / unix)
+- **Time range** — `last=15m` (`s/m/h/d`) or absolute `from`/`to` (RFC3339 / unix).
+  These are reserved keys: a range written **in the query wins** over the `?last=`
+  / `?from=` / `?to=` request parameters and over the UI's range picker, which
+  dims to say so. Naming any lower bound in the query (`last=` or `from=`)
+  replaces the request's lower bound entirely, so the two cannot be mixed into a
+  range nobody asked for. To filter an *attribute* that happens to be called
+  `last`, `from` or `to`, use the explicit prefix: `attr.last=1h`.
 
 Filters are AND-combined. (Cross-field OR-grouping with parentheses is planned with
 the query-language spec; `IN` covers the common same-field OR case today.)
+
+An unparseable time bound is a `400` naming it, not an empty result. This used to
+be the reverse: `last` was not a known key, so `last=1h` fell through to the
+attribute fallback, became `attr.last="1h"`, matched nothing and reported no
+error — indistinguishable from having no logs.
+
+Two places deliberately ignore a range in the expression, because they have no
+use for one: an **alert rule** is always evaluated over its own `window_seconds`
+(so a stale bound in a saved query cannot freeze the rule on old data), and
+**live tail** is forward-looking. An **ingest pipeline**'s match expression
+rejects one outright, since it runs on a single event at a time.
 
 ### Aggregations
 

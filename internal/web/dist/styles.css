@@ -478,3 +478,11 @@ a:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; border-
 
 /* "authenticated" marker on a channel that carries a bearer token. */
 .chan-auth { font-size: .78rem; font-weight: 400; opacity: .7; margin-left: .4rem; }
+
+/* The range picker is ignored when the query sets its own bounds. */
+.range-override {
+  align-self: center; font-size: .78rem; color: var(--muted);
+  border: 1px dashed var(--chip-border); border-radius: 999px; padding: .15rem .5rem;
+  white-space: nowrap;
+}
+#range-select.is-overridden { opacity: .55; }

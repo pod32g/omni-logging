@@ -145,3 +145,153 @@ func TestMatches_TimeBounds(t *testing.T) {
 		t.Error("event after To should not match")
 	}
 }
+
+// --- time directives in the expression --------------------------------------
+
+// TestParse_TimeInExpression is the regression test for a silent failure: `last`
+// is not a known field, so it used to fall through to the attribute fallback and
+// become attr.last="1h". That matched nothing, returned no error, and looked
+// exactly like "there are no logs" on a database taking events every second.
+func TestParse_TimeInExpression(t *testing.T) {
+	q, err := Parse("level=error last=1h")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if q.Time.Last != "1h" {
+		t.Errorf("Time.Last = %q, want %q", q.Time.Last, "1h")
+	}
+	for _, f := range q.Filters {
+		if f.Attr == "last" {
+			t.Fatal("last= became an attribute filter again; it matches nothing and reports no error")
+		}
+	}
+	if len(q.Filters) != 1 || q.Filters[0].Field != FieldLevel {
+		t.Errorf("the rest of the expression should be untouched: %+v", q.Filters)
+	}
+	if len(q.Terms) != 0 {
+		t.Errorf("a time directive must not leak into free-text terms: %v", q.Terms)
+	}
+}
+
+func TestParse_TimeDirectiveVariants(t *testing.T) {
+	q, err := Parse("from=2026-01-01T00:00:00Z to=1767225600")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if q.Time.From != "2026-01-01T00:00:00Z" || q.Time.To != "1767225600" {
+		t.Errorf("Time = %+v", q.Time)
+	}
+	if len(q.Filters) != 0 {
+		t.Errorf("from/to must not also become filters: %+v", q.Filters)
+	}
+}
+
+// TestParse_AttrPrefixEscapesTimeKeys: reserving these keys must not make an
+// event attribute genuinely called "last" unreachable.
+func TestParse_AttrPrefixEscapesTimeKeys(t *testing.T) {
+	q, err := Parse("attr.last=1h")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !q.Time.IsZero() {
+		t.Errorf("attr.last must stay an attribute filter, got Time=%+v", q.Time)
+	}
+	if len(q.Filters) != 1 || q.Filters[0].Attr != "last" {
+		t.Fatalf("filters = %+v", q.Filters)
+	}
+}
+
+func TestParse_TimeDirectiveErrors(t *testing.T) {
+	for _, expr := range []string{
+		"last=banana",   // not a duration
+		"last=",         // empty
+		"from=nonsense", // not a time
+		"last>1h",       // ranges are from/to, not a comparison
+		"last=1h last=2h",
+	} {
+		if _, err := Parse(expr); err == nil {
+			t.Errorf("Parse(%q) should have failed rather than silently matching nothing", expr)
+		}
+	}
+}
+
+// TestBuild_ExpressionTimeWinsOverParams: the expression is the more specific
+// statement, so it beats the request's range picker.
+func TestBuild_ExpressionTimeWinsOverParams(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	q, err := Params{Q: "last=15m", Last: "24h"}.Build(now)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if want := now.Add(-15 * time.Minute); !q.From.Equal(want) {
+		t.Errorf("From = %s, want %s (the expression's 15m, not the request's 24h)", q.From, want)
+	}
+}
+
+// TestBuild_ExpressionLowerBoundIgnoresRequestLower: a from= in the expression
+// must not be half-overridden by a last= on the request.
+func TestBuild_ExpressionLowerBoundIgnoresRequestLower(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	q, err := Params{Q: "from=2026-07-01T00:00:00Z", Last: "1h"}.Build(now)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	want := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if !q.From.Equal(want) {
+		t.Errorf("From = %s, want %s", q.From, want)
+	}
+}
+
+// TestBuild_ParamsStillApplyWithoutExpressionTime: the request parameters must
+// keep working, since that is how the UI's range picker sends the range.
+func TestBuild_ParamsStillApplyWithoutExpressionTime(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	q, err := Params{Q: "level=error", Last: "30m"}.Build(now)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if want := now.Add(-30 * time.Minute); !q.From.Equal(want) {
+		t.Errorf("From = %s, want %s", q.From, want)
+	}
+}
+
+// TestBuild_ExpressionLastAnchorsToExpressionTo: "to" bounds the window, and a
+// relative window hangs off it rather than off now.
+func TestBuild_ExpressionLastAnchorsToExpressionTo(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	q, err := Params{Q: "to=2026-07-20T00:00:00Z last=1h"}.Build(now)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	to := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	if !q.To.Equal(to) {
+		t.Errorf("To = %s, want %s", q.To, to)
+	}
+	if want := to.Add(-time.Hour); !q.From.Equal(want) {
+		t.Errorf("From = %s, want %s (anchored to `to`, not to now)", q.From, want)
+	}
+}
+
+// TestBuild_TimeWorksAlongsideAggregation: the reported symptom was a
+// time-filtered aggregation returning zero, so pin both halves together.
+func TestBuild_TimeWorksAlongsideAggregation(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+
+	q, err := Params{Q: "level=error last=1h | stats count by service"}.Build(now)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !q.IsAggregation() {
+		t.Fatal("the aggregation stage was lost")
+	}
+	if want := now.Add(-time.Hour); !q.From.Equal(want) {
+		t.Errorf("From = %s, want %s", q.From, want)
+	}
+	if len(q.Filters) != 1 {
+		t.Errorf("filters = %+v", q.Filters)
+	}
+}

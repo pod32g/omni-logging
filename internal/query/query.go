@@ -58,6 +58,7 @@ type Filter struct {
 type Query struct {
 	Terms    []string // free-text terms, AND-combined
 	Filters  []Filter
+	Time     TimeSpec      // time directives written in the expression, unresolved
 	From, To time.Time     // inclusive lower / upper bound on event time (zero = unbounded)
 	Limit    int           // max events to return
 	Order    Order         // sort direction
@@ -74,6 +75,27 @@ type Query struct {
 	// filter half still applies exactly as it does for a plain search.
 	Agg *Aggregation
 }
+
+// TimeSpec holds the time directives written in a query expression —
+// `last=15m`, `from=…`, `to=…` — exactly as typed. Parse records them but does
+// not resolve them, because resolving a relative window needs a clock and Parse
+// deliberately has none. Build turns them into From/To.
+//
+// They stay inert until something resolves them, which is what makes it safe
+// for callers that parse an expression without a clock (ingest pipelines) to
+// ignore time entirely.
+type TimeSpec struct {
+	Last string // relative window, e.g. "15m"
+	From string // absolute lower bound (RFC3339 or unix seconds)
+	To   string // absolute upper bound
+}
+
+// IsZero reports whether the expression named no time bound at all.
+func (t TimeSpec) IsZero() bool { return t.Last == "" && t.From == "" && t.To == "" }
+
+// HasLowerBound reports whether the expression pinned the start of the range,
+// by either an absolute from or a relative window.
+func (t TimeSpec) HasLowerBound() bool { return t.From != "" || t.Last != "" }
 
 // IsAggregation reports whether this query produces a table rather than events.
 func (q Query) IsAggregation() bool { return q.Agg != nil }

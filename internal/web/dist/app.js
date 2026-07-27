@@ -93,6 +93,7 @@ let searchCursor = ""; // keyset cursor for the next page, "" when exhausted
 
 function buildSearchURL(base) {
   const q = $("#q").value.trim();
+  syncRangeOverride();
   const range = $("#range").value;
   const order = $("#order-chip").dataset.order;
   const p = new URLSearchParams();
@@ -100,6 +101,27 @@ function buildSearchURL(base) {
   if (range) p.set("last", range);
   p.set("order", order);
   return base + "?" + p.toString();
+}
+
+// hasTimeDirective reports whether the query sets its own time range, in which
+// case the server ignores the range picker (the expression is the more specific
+// statement). The leading (^|\s) is what keeps attr.last= out of it — there the
+// key is preceded by a dot, not a boundary.
+//
+// Advisory only: this drives a label, never the request. The server decides.
+function hasTimeDirective(q) {
+  return /(^|\s)(last|from|to)=/i.test(q);
+}
+
+// syncRangeOverride marks the range picker as overridden, so a query saying
+// last=24h while the picker reads "Last 1 hour" does not look like a bug.
+function syncRangeOverride() {
+  const overridden = hasTimeDirective($("#q").value);
+  $("#range-override").hidden = !overridden;
+  $("#range-select").classList.toggle("is-overridden", overridden);
+  $("#range-select").title = overridden
+    ? "The query sets its own time range, so this picker is ignored."
+    : "";
 }
 
 // hasPipeline reports whether the query carries an aggregation stage. A '|'
@@ -436,6 +458,8 @@ function facetRow(name, count, max, color, mono, queryFrag) {
 $("#search-form").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
 $("#search-btn").addEventListener("click", runSearch);
 $("#range").addEventListener("change", runSearch);
+$("#q").addEventListener("input", syncRangeOverride);
+syncRangeOverride();
 $("#load-more").addEventListener("click", loadMore);
 $("#export-ndjson").addEventListener("click", () => download("ndjson"));
 $("#export-csv").addEventListener("click", () => download("csv"));

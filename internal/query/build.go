@@ -44,25 +44,46 @@ func (p Params) Build(now time.Time) (Query, error) {
 		q.Agg = agg
 	}
 
-	if p.To != "" {
-		t, err := ParseTime(p.To)
+	// Time bounds: a bound written in the expression wins over the request
+	// parameter. The expression is the more specific statement — someone who
+	// types "last=5m" into the search box means it, and having the range picker
+	// silently override it would be the same class of surprise as the bug that
+	// made the expression form do nothing at all.
+	//
+	// The two bounds are decided independently, but each is decided wholly by
+	// one source: if the expression names any lower bound, the request's From
+	// and Last are both ignored, so a `from=` in the query cannot be
+	// half-overridden by a `last=` on the request.
+	toExpr := q.Time.To
+	if toExpr == "" {
+		toExpr = p.To
+	}
+	if toExpr != "" {
+		t, err := ParseTime(toExpr)
 		if err != nil {
 			return Query{}, err
 		}
 		q.To = t
 	}
+
+	fromExpr, lastExpr := q.Time.From, q.Time.Last
+	if !q.Time.HasLowerBound() {
+		fromExpr, lastExpr = p.From, p.Last
+	}
 	switch {
-	case p.From != "":
-		t, err := ParseTime(p.From)
+	case fromExpr != "":
+		t, err := ParseTime(fromExpr)
 		if err != nil {
 			return Query{}, err
 		}
 		q.From = t
-	case p.Last != "":
-		d, err := ParseRelative(p.Last)
+	case lastExpr != "":
+		d, err := ParseRelative(lastExpr)
 		if err != nil {
 			return Query{}, err
 		}
+		// Anchor the window to the upper bound when one was given, so
+		// "from=… to=…"-style ranges and "last=" compose predictably.
 		upper := q.To
 		if upper.IsZero() {
 			upper = now

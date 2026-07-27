@@ -575,3 +575,35 @@ func TestRuleValidateSeverity(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateWindowBeatsTimeInTheQuery: now that `last=` in an expression
+// actually resolves, a rule whose query carries one must still be evaluated over
+// the rule's own window. Otherwise a rule written as "level=error last=1h" with
+// a 5m window would silently examine twelve times the intended range.
+func TestEvaluateWindowBeatsTimeInTheQuery(t *testing.T) {
+	rule := baseRule()
+	rule.Query = "level=error last=1h"
+	rule.Window = 5 * time.Minute
+	r := &fakeRunner{search: store.SearchResult{Total: 0}}
+
+	if _, err := Evaluate(context.Background(), r, rule, now); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lastQ.From.Equal(now.Add(-5 * time.Minute)) {
+		t.Errorf("query From = %s, want the rule's 5m window, not the query's 1h", r.lastQ.From)
+	}
+}
+
+// TestEvaluateRejectsBadTimeInQuery: a malformed time bound should be reported
+// when the rule is saved or evaluated, not swallowed.
+func TestEvaluateRejectsBadTimeInQuery(t *testing.T) {
+	rule := baseRule()
+	rule.Query = "level=error last=banana"
+	r := &fakeRunner{search: store.SearchResult{Total: 0}}
+
+	if _, err := Evaluate(context.Background(), r, rule, now); err == nil {
+		t.Fatal("an unparseable time bound in a rule query must be an error")
+	}
+}

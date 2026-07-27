@@ -38,6 +38,13 @@ func Parse(expr string) (Query, error) {
 			q.Terms = append(q.Terms, tok.text)
 			continue
 		}
+		handled, err := parseTimeDirective(&q.Time, tok.text)
+		if err != nil {
+			return Query{}, err
+		}
+		if handled {
+			continue
+		}
 		f, isFilter, err := parseFilter(tok.text)
 		if err != nil {
 			return Query{}, err
@@ -49,6 +56,66 @@ func Parse(expr string) (Query, error) {
 		}
 	}
 	return q, nil
+}
+
+// timeKeys are the reserved keys that set the query's time range rather than
+// filtering a field. They are reserved *before* the attribute fallback, so
+// `last=15m` is a time window and not the attribute filter attr.last="15m" —
+// which is what it silently became before, matching nothing and reporting no
+// error. An event genuinely carrying one of these as an attribute is still
+// reachable with the explicit `attr.` prefix.
+var timeKeys = map[string]bool{"last": true, "from": true, "to": true}
+
+// parseTimeDirective recognises `last=`, `from=` and `to=`, recording them on
+// spec without resolving. It reports whether the token was consumed.
+func parseTimeDirective(spec *TimeSpec, tok string) (bool, error) {
+	op, key, val, ok := splitOp(tok)
+	if !ok {
+		return false, nil
+	}
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if !timeKeys[lower] {
+		return false, nil
+	}
+	if op != "=" {
+		// Ranges are expressed with from/to, so `last>1h` has no meaning. Saying
+		// so beats treating it as an attribute comparison that matches nothing.
+		return false, fmt.Errorf("time bound %q only supports '='; use from=/to= for a range, or attr.%s%s… to filter an attribute", lower, lower, op)
+	}
+	val = strings.Trim(strings.TrimSpace(val), `"`)
+	if val == "" {
+		return false, fmt.Errorf("empty value for %q", lower)
+	}
+
+	// Validate now, while the offending token is still in hand. Resolution
+	// happens in Build, which has a clock.
+	switch lower {
+	case "last":
+		if _, err := ParseRelative(val); err != nil {
+			return false, err
+		}
+		if spec.Last != "" {
+			return false, fmt.Errorf("last= given more than once")
+		}
+		spec.Last = val
+	case "from":
+		if _, err := ParseTime(val); err != nil {
+			return false, err
+		}
+		if spec.From != "" {
+			return false, fmt.Errorf("from= given more than once")
+		}
+		spec.From = val
+	case "to":
+		if _, err := ParseTime(val); err != nil {
+			return false, err
+		}
+		if spec.To != "" {
+			return false, fmt.Errorf("to= given more than once")
+		}
+		spec.To = val
+	}
+	return true, nil
 }
 
 // splitOp finds the comparison operator in a filter token and returns the

@@ -48,7 +48,7 @@
                placeholder="level=error service=checkout-api timeout" />
         <span class="tag">SPL</span>
       </form>
-      <div class="select" id="range-select">
+      <div class="select" id="range-select" title="">
         <svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
         <select id="range">
           <option value="15m">Last 15 minutes</option>
@@ -60,6 +60,7 @@
         </select>
       </div>
       <button class="btn-primary" id="search-btn">Search</button>
+      <span class="range-override" id="range-override" hidden>query sets the range</span>
     </div>
 
     <div class="body">

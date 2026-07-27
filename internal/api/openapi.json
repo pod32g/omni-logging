@@ -151,7 +151,7 @@
           {
             "name": "q",
             "in": "query",
-            "description": "Query expression (filters, operators, free text)",
+            "description": "Query expression (filters, operators, free text). May also carry its own time range via last=/from=/to=, which takes precedence over the last/from/to parameters below. Use the attr. prefix to filter an attribute of that name.",
             "schema": {
               "type": "string"
             }
@@ -161,19 +161,21 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Absolute lower bound (RFC3339 or unix seconds). Ignored when q sets its own lower bound."
           },
           {
             "name": "to",
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Absolute upper bound (RFC3339 or unix seconds). Ignored when q sets to=."
           },
           {
             "name": "last",
             "in": "query",
-            "description": "Relative window e.g. 15m, 1h, 7d",
+            "description": "Relative window e.g. 15m, 1h, 7d. Ignored when the q expression sets its own lower bound.",
             "schema": {
               "type": "string"
             }
@@ -243,7 +245,8 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Relative window e.g. 15m, 1h, 7d. Ignored when the q expression sets its own lower bound."
           },
           {
             "name": "interval",
@@ -292,7 +295,8 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Relative window e.g. 15m, 1h, 7d. Ignored when the q expression sets its own lower bound."
           },
           {
             "name": "format",
@@ -515,19 +519,21 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Absolute lower bound (RFC3339 or unix seconds). Ignored when q sets its own lower bound."
           },
           {
             "name": "to",
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Absolute upper bound (RFC3339 or unix seconds). Ignored when q sets to=."
           },
           {
             "name": "last",
             "in": "query",
-            "description": "Relative window e.g. 15m, 1h, 7d",
+            "description": "Relative window e.g. 15m, 1h, 7d. Ignored when the q expression sets its own lower bound.",
             "schema": {
               "type": "string"
             }

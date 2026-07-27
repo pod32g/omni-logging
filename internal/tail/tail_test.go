@@ -130,3 +130,25 @@ func TestHub_UnsubscribeStopsDelivery(t *testing.T) {
 	// Publishing after close must not panic.
 	hub.Publish(ev(model.LevelInfo, "x"))
 }
+
+// TestTailIgnoresTimeInTheQuery: live tail follows events forward, so a time
+// bound written into the expression must not filter the stream. Before time
+// directives resolved this was moot; now it has to be explicit, or "last=1h"
+// typed into the tail box would silently drop every event once the hour elapsed.
+func TestTailIgnoresTimeInTheQuery(t *testing.T) {
+	q, err := query.Params{Q: "level=error last=1h"}.Build(time.Now())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Mirrors what the SSE handler does immediately after building.
+	q.From, q.To = time.Time{}, time.Time{}
+
+	e := model.LogEvent{
+		Timestamp: time.Now().Add(-72 * time.Hour), // far outside the stated window
+		Level:     model.LevelError,
+		Message:   "old but streaming",
+	}
+	if !q.Matches(e) {
+		t.Error("a tailed event was filtered by a historical bound; tail is forward-looking")
+	}
+}
