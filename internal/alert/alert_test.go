@@ -336,3 +336,242 @@ func TestNotificationText(t *testing.T) {
 		t.Errorf("expected the group list to be truncated: %q", txt)
 	}
 }
+
+// --- Omni-Notify channel ----------------------------------------------------
+
+// omniNotifyReceiver stands in for Omni-Notify's event API.
+type omniNotifyReceiver struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	paths  []string
+	auths  []string
+	events []map[string]any
+}
+
+func newOmniNotifyReceiver(t *testing.T) *omniNotifyReceiver {
+	t.Helper()
+	r := &omniNotifyReceiver{}
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// Omni-Notify rejects anything without a bearer token, so reproduce that
+		// here: a test that accepted unauthenticated posts would not notice the
+		// header going missing.
+		if req.Header.Get("Authorization") == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var ev map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&ev); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		r.mu.Lock()
+		r.paths = append(r.paths, req.URL.Path)
+		r.auths = append(r.auths, req.Header.Get("Authorization"))
+		r.events = append(r.events, ev)
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+func (r *omniNotifyReceiver) last() map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.events) == 0 {
+		return nil
+	}
+	return r.events[len(r.events)-1]
+}
+
+func omniNote(state State) Notification {
+	return Notification{
+		Rule: "checkout errors", RuleID: "rule-123",
+		State: state, Severity: SeverityCritical, Value: 50,
+		Condition: "> 10", Query: "level=error service=checkout", Window: "5m", At: now,
+		Groups: []GroupHit{{Labels: map[string]string{"service": "checkout"}, Value: 50}},
+	}
+}
+
+func TestOmniNotifyChannelPayload(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "notify", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+
+	if err := NewNotifier(nil).Send(context.Background(), ch, omniNote(StateFiring)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ev := rec.last()
+
+	for k, want := range map[string]any{
+		"event_id": "rule-123",
+		"type":     "alert",
+		"source":   "omni-logging",
+		"status":   "firing",
+		"severity": "critical",
+		"title":    "checkout errors",
+	} {
+		if ev[k] != want {
+			t.Errorf("%s = %#v, want %#v", k, ev[k], want)
+		}
+	}
+	if ev["summary"] == "" || ev["description"] == "" {
+		t.Errorf("summary/description should be populated: %#v", ev)
+	}
+
+	// The bearer token must actually be sent; Omni-Notify 401s without it.
+	rec.mu.Lock()
+	auth := rec.auths[0]
+	path := rec.paths[0]
+	rec.mu.Unlock()
+	if auth != "Bearer tok" {
+		t.Errorf("Authorization = %q", auth)
+	}
+	if path != "/api/v1/events" {
+		t.Errorf("posted to %q, want the events endpoint", path)
+	}
+}
+
+// TestOmniNotifyLabelsAreStableAcrossTransitions is the property the whole
+// mapping is built around. Omni-Notify fingerprints on
+// sha256(type|source|event_id|sorted labels); if a label differed between
+// firing and resolved, the resolve would look like a resolve for something
+// that never fired, be suppressed, and the alert would stay active forever.
+func TestOmniNotifyLabelsAreStableAcrossTransitions(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "notify", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+	n := NewNotifier(nil)
+
+	firing := omniNote(StateFiring)
+	if err := n.Send(context.Background(), ch, firing); err != nil {
+		t.Fatal(err)
+	}
+	firingEvent := rec.last()
+
+	// The resolve reports a different value and different groups, as a real
+	// recovery would.
+	resolved := omniNote(StateOK)
+	resolved.Value = 0
+	resolved.Groups = nil
+	if err := n.Send(context.Background(), ch, resolved); err != nil {
+		t.Fatal(err)
+	}
+	resolvedEvent := rec.last()
+
+	if firingEvent["status"] != "firing" || resolvedEvent["status"] != "resolved" {
+		t.Fatalf("statuses = %v / %v", firingEvent["status"], resolvedEvent["status"])
+	}
+	if firingEvent["event_id"] != resolvedEvent["event_id"] {
+		t.Errorf("event_id changed between transitions: %v -> %v",
+			firingEvent["event_id"], resolvedEvent["event_id"])
+	}
+
+	fl, _ := json.Marshal(firingEvent["labels"])
+	rl, _ := json.Marshal(resolvedEvent["labels"])
+	if string(fl) != string(rl) {
+		t.Errorf("labels differ between firing and resolved, so the resolve would\n"+
+			"fingerprint differently and be suppressed:\n  firing:   %s\n  resolved: %s", fl, rl)
+	}
+
+	// The value *did* change, and must therefore live in annotations, which are
+	// matchable but outside the fingerprint.
+	fa, _ := firingEvent["annotations"].(map[string]any)
+	ra, _ := resolvedEvent["annotations"].(map[string]any)
+	if fa["value"] == ra["value"] {
+		t.Errorf("the observed value should differ between transitions: %v", fa["value"])
+	}
+	if _, leaked := firingEvent["labels"].(map[string]any)["value"]; leaked {
+		t.Error("the observed value is in labels; it must be in annotations or dedup breaks")
+	}
+}
+
+func TestOmniNotifyAcceptsBaseOrFullURL(t *testing.T) {
+	for _, suffix := range []string{"", "/", "/api/v1/events", "/api/v1/events/"} {
+		rec := newOmniNotifyReceiver(t)
+		ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: rec.srv.URL + suffix, Token: "tok"}
+		if err := NewNotifier(nil).Send(context.Background(), ch, omniNote(StateFiring)); err != nil {
+			t.Fatalf("URL suffix %q: %v", suffix, err)
+		}
+		rec.mu.Lock()
+		got := rec.paths[0]
+		rec.mu.Unlock()
+		if got != "/api/v1/events" {
+			t.Errorf("URL suffix %q posted to %q", suffix, got)
+		}
+	}
+}
+
+func TestOmniNotifyDefaultsSeverity(t *testing.T) {
+	rec := newOmniNotifyReceiver(t)
+	ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: rec.srv.URL, Token: "tok"}
+	note := omniNote(StateFiring)
+	note.Severity = "" // a rule stored before severity existed
+
+	if err := NewNotifier(nil).Send(context.Background(), ch, note); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.last()["severity"]; got != string(DefaultSeverity) {
+		t.Errorf("severity = %v, want the default %q — an empty severity would fall\n"+
+			"through every severity-matching route downstream", got, DefaultSeverity)
+	}
+}
+
+func TestOmniNotifyChannelRequiresToken(t *testing.T) {
+	ch := Channel{Name: "n", Type: ChannelOmniNotify, URL: "http://notify:8088"}
+	if err := ch.Validate(); err == nil {
+		t.Fatal("an omni-notify channel without a token must be rejected at save time")
+	}
+	ch.Token = "tok"
+	if err := ch.Validate(); err != nil {
+		t.Fatalf("with a token it should validate: %v", err)
+	}
+}
+
+// TestChannelTokenIsMasked: the channels endpoint is unauthenticated when no
+// admin token is set, so a token returned verbatim would be readable by anyone
+// who can reach the port.
+func TestChannelTokenIsMasked(t *testing.T) {
+	c := Channel{Name: "n", Type: ChannelOmniNotify, URL: "http://notify:8088", Token: "super-secret"}
+	m := c.Masked()
+	if m.Token == "super-secret" {
+		t.Fatal("the token was returned in the clear")
+	}
+	if m.Token != TokenMask {
+		t.Errorf("masked token = %q", m.Token)
+	}
+	if c.Token != "super-secret" {
+		t.Error("Masked must not mutate the receiver")
+	}
+
+	// And posting the mask back must be refused rather than stored.
+	if err := m.Validate(); err == nil {
+		t.Error("saving a channel whose token is the mask must be rejected")
+	}
+}
+
+func TestRuleValidateSeverity(t *testing.T) {
+	base := func() Rule {
+		return Rule{Name: "r", Query: "level=error", Interval: time.Minute,
+			Window: 5 * time.Minute, Cond: Condition{Op: OpGT, Value: 1}}
+	}
+	r := base()
+	if err := r.Validate(); err != nil {
+		t.Fatalf("an empty severity should default rather than fail: %v", err)
+	}
+	if r.Severity != DefaultSeverity {
+		t.Errorf("severity = %q, want the default %q", r.Severity, DefaultSeverity)
+	}
+
+	r = base()
+	r.Severity = "catastrophic"
+	if err := r.Validate(); err == nil {
+		t.Error("an unknown severity must be rejected; downstream routing matches on it exactly")
+	}
+
+	for _, s := range []Severity{SeverityCritical, SeverityError, SeverityWarning, SeverityInfo, SeverityDebug} {
+		r = base()
+		r.Severity = s
+		if err := r.Validate(); err != nil {
+			t.Errorf("severity %q should be valid: %v", s, err)
+		}
+	}
+}

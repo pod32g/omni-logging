@@ -702,7 +702,12 @@ function renderChannels() {
     const row = el("div", "chan");
     row.appendChild(el("span", "chan-type", c.type));
     const main = el("div", "chan-main");
-    main.appendChild(el("div", "chan-name", c.name));
+    const name = el("div", "chan-name", c.name);
+    // The token reads back masked, so its presence is all the UI can show —
+    // and all it should: this list is served without auth when no admin token
+    // is set.
+    if (c.token) name.appendChild(el("span", "chan-auth", " 🔒 authenticated"));
+    main.appendChild(name);
     main.appendChild(el("div", "chan-url mono", c.url));
     row.appendChild(main);
 
@@ -748,6 +753,7 @@ function openRuleEditor(rule) {
   $("#al-interval").value = rule ? rule.interval_seconds : 60;
   $("#al-op").value = rule ? rule.condition.op : "gt";
   $("#al-value").value = rule ? rule.condition.value : 10;
+  $("#al-severity").value = (rule && rule.severity) || "warning";
   $("#al-enabled").checked = rule ? rule.enabled : true;
   $("#al-editor-msg").textContent = "";
   $("#al-dryrun-out").hidden = true;
@@ -763,6 +769,7 @@ function ruleFromEditor() {
     window_seconds: parseInt($("#al-window").value, 10) || 0,
     interval_seconds: parseInt($("#al-interval").value, 10) || 0,
     condition: { op: $("#al-op").value, value: parseFloat($("#al-value").value) || 0 },
+    severity: $("#al-severity").value,
     channels: [...alSelectedChannels],
     enabled: $("#al-enabled").checked,
   };
@@ -829,6 +836,8 @@ async function addChannel() {
     type: $("#al-chan-type").value,
     url: $("#al-chan-url").value.trim(),
   };
+  const token = $("#al-chan-token").value.trim();
+  if (token) body.token = token;
   try {
     const res = await apiSend("POST", "/api/v1/alerts/channels", body);
     if (!res.ok) {
@@ -838,6 +847,7 @@ async function addChannel() {
     }
     $("#al-chan-name").value = "";
     $("#al-chan-url").value = "";
+    $("#al-chan-token").value = "";
     msg.textContent = "Added.";
     msg.className = "cfg-msg ok";
     await loadAlerts();
@@ -871,6 +881,20 @@ async function deleteChannel(chan) {
     if (e.message !== "unauthorized") console.error(e);
   }
 }
+
+// Omni-Notify rejects every call without a token, so make the field's necessity
+// visible at the moment the type is chosen rather than at the first failed
+// delivery.
+function syncChannelTypeHints() {
+  const isNotify = $("#al-chan-type").value === "omni-notify";
+  $("#al-chan-token-hint").hidden = !isNotify;
+  $("#al-chan-token").placeholder = isNotify ? "OMNI_NOTIFY_API_TOKEN (required)" : "bearer token (optional)";
+  $("#al-chan-url").placeholder = isNotify
+    ? "http://omni-notify:8088"
+    : "https://hooks.slack.com/services/...";
+}
+$("#al-chan-type").addEventListener("change", syncChannelTypeHints);
+syncChannelTypeHints();
 
 $("#al-new").addEventListener("click", () => openRuleEditor(null));
 $("#al-cancel").addEventListener("click", () => { $("#al-editor").hidden = true; alEditingID = null; });

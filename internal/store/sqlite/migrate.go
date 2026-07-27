@@ -114,6 +114,19 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS idx_pipelines_order ON pipelines(sort_order)`,
 		},
 	},
+	{
+		version: 6,
+		name:    "alert severity and channel tokens",
+		stmts: []string{
+			// Severity is how bad a rule is, independent of whether it is
+			// firing. Existing rules default to 'warning' so nothing that was
+			// already scheduled changes meaning.
+			`ALTER TABLE alert_rules ADD COLUMN severity TEXT NOT NULL DEFAULT 'warning'`,
+			// A bearer credential for the channel's target, needed by
+			// Omni-Notify and usable by any webhook that wants auth.
+			`ALTER TABLE alert_channels ADD COLUMN token TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // rebuildFTSRowids re-creates every full-text row keyed by its logs.rowid,

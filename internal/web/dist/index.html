@@ -185,6 +185,15 @@
               <input type="number" id="al-value" step="any" value="10" />
             </div>
           </div>
+          <div class="set-row"><label for="al-severity">Severity</label>
+            <select id="al-severity">
+              <option value="critical">critical</option>
+              <option value="error">error</option>
+              <option value="warning" selected>warning</option>
+              <option value="info">info</option>
+              <option value="debug">debug</option>
+            </select>
+          </div>
           <div class="set-row"><label>Notify these channels</label><div class="keys" id="al-channels"></div></div>
           <div class="set-row"><label for="al-enabled">Enabled</label><input type="checkbox" id="al-enabled" checked /></div>
           <div class="set-actions">
@@ -200,13 +209,15 @@
       <div class="settings-col">
         <div class="card">
           <h3>Notification channels</h3>
-          <p class="hint">A <strong>webhook</strong> receives the full JSON payload; <strong>slack</strong> receives a rendered <code>{"text"}</code>. The server makes outbound requests to these URLs.</p>
+          <p class="hint">A <strong>webhook</strong> receives the full JSON payload; <strong>slack</strong> receives a rendered <code>{"text"}</code>; <strong>omni-notify</strong> posts an event to an <a href="https://github.com/pod32g/omni-notify">Omni-Notify</a> server, which handles deduplication, routing and delivery to Discord/Telegram/SMTP. The server makes outbound requests to these URLs.</p>
           <div class="chans" id="al-chan-list"></div>
           <div class="set-row"><label for="al-chan-name">Name</label><input type="text" id="al-chan-name" placeholder="ops" autocomplete="off" /></div>
           <div class="set-row"><label for="al-chan-type">Type</label>
-            <select id="al-chan-type"><option value="webhook">webhook</option><option value="slack">slack</option></select>
+            <select id="al-chan-type"><option value="webhook">webhook</option><option value="slack">slack</option><option value="omni-notify">omni-notify</option></select>
           </div>
           <div class="set-row"><label for="al-chan-url">URL</label><input type="text" id="al-chan-url" class="mono" placeholder="https://hooks.slack.com/services/..." autocomplete="off" /></div>
+          <div class="set-row" id="al-chan-token-row"><label for="al-chan-token">Token</label><input type="password" id="al-chan-token" class="mono" placeholder="bearer token" autocomplete="off" /></div>
+          <p class="hint" id="al-chan-token-hint" hidden>Sent as <code>Authorization: Bearer</code>. Omni-Notify requires one — its <code>OMNI_NOTIFY_API_TOKEN</code>. Stored server-side and never read back.</p>
           <div class="set-actions">
             <button class="btn-primary" id="al-chan-add">Add channel</button>
             <span class="cfg-msg" id="al-chan-msg"></span>

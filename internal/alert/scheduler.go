@@ -170,10 +170,18 @@ func (s *Scheduler) evaluateAndNotify(ctx context.Context, rule Rule, channels m
 		return
 	}
 
+	severity := rule.Severity
+	if severity == "" {
+		// Rules stored before severity existed carry none; treat them as the
+		// default rather than sending an empty string downstream, where it
+		// would fall through every severity-matching route.
+		severity = DefaultSeverity
+	}
 	note := Notification{
 		Rule:      rule.Name,
 		RuleID:    rule.ID,
 		State:     rule.State,
+		Severity:  severity,
 		Value:     ev.Value,
 		Condition: rule.Cond.String(),
 		Query:     rule.Query,

@@ -74,6 +74,36 @@ const (
 	MaxWindow   = 30 * 24 * time.Hour
 )
 
+// Severity is how bad a firing rule is. It is deliberately Omni-Notify's
+// vocabulary: severity is the axis downstream routing discriminates on, and
+// inventing a parallel set of words here would mean translating between two
+// near-identical ladders at the boundary.
+//
+// It is orthogonal to State. State is the lifecycle (is it firing right now);
+// severity is the standing judgement of how much it matters, and does not
+// change when the rule resolves.
+type Severity string
+
+const (
+	SeverityCritical Severity = "critical"
+	SeverityError    Severity = "error"
+	SeverityWarning  Severity = "warning"
+	SeverityInfo     Severity = "info"
+	SeverityDebug    Severity = "debug"
+)
+
+// DefaultSeverity applies to rules that predate the field or leave it empty.
+const DefaultSeverity = SeverityWarning
+
+// Valid reports whether s is a known severity.
+func (s Severity) Valid() bool {
+	switch s {
+	case SeverityCritical, SeverityError, SeverityWarning, SeverityInfo, SeverityDebug:
+		return true
+	}
+	return false
+}
+
 // Rule is a scheduled query with a threshold.
 type Rule struct {
 	ID       string        `json:"id"`
@@ -82,6 +112,7 @@ type Rule struct {
 	Window   time.Duration `json:"-"`     // how far back each evaluation looks
 	Interval time.Duration `json:"-"`     // how often to evaluate
 	Cond     Condition     `json:"condition"`
+	Severity Severity      `json:"severity"` // how bad; routed on downstream
 	Channels []string      `json:"channels"` // channel IDs notified on transitions
 	Enabled  bool          `json:"enabled"`
 
@@ -109,6 +140,12 @@ func (r *Rule) Validate() error {
 	default:
 		return fmt.Errorf("alert: condition op must be one of gt, gte, lt, lte, eq, ne")
 	}
+	if r.Severity == "" {
+		r.Severity = DefaultSeverity
+	}
+	if !r.Severity.Valid() {
+		return fmt.Errorf("alert: severity must be one of critical, error, warning, info, debug")
+	}
 	if r.Interval < MinInterval {
 		return fmt.Errorf("alert: interval must be at least %s", MinInterval)
 	}
@@ -129,15 +166,37 @@ type ChannelType string
 const (
 	ChannelWebhook ChannelType = "webhook" // POST the full JSON payload
 	ChannelSlack   ChannelType = "slack"   // POST {"text": ...} to an incoming webhook
+
+	// ChannelOmniNotify posts to an Omni-Notify event API. Omni-Notify does not
+	// evaluate rules; it deduplicates, routes and delivers, with retries and a
+	// durable queue. Sending there instead of to a chat webhook directly means
+	// this package stays out of the business of Discord/Telegram/SMTP
+	// providers and delivery retry — a seam the two projects already imply.
+	ChannelOmniNotify ChannelType = "omni-notify"
 )
+
+// TokenMask is returned in place of a channel's token whenever a channel is
+// read back through the API. The token is a bearer credential for another
+// service, and the channels endpoint is unauthenticated when no admin token is
+// configured, so returning it verbatim would hand it to anyone who can reach
+// the port.
+const TokenMask = "••••••••"
 
 // Channel is a notification destination.
 type Channel struct {
-	ID        string      `json:"id"`
-	Name      string      `json:"name"`
-	Type      ChannelType `json:"type"`
-	URL       string      `json:"url"`
-	CreatedAt time.Time   `json:"created_at,omitzero"`
+	ID   string      `json:"id"`
+	Name string      `json:"name"`
+	Type ChannelType `json:"type"`
+	URL  string      `json:"url"`
+
+	// Token is a bearer credential sent as Authorization: Bearer <token>.
+	// Required for omni-notify; optional for a webhook that wants auth. It
+	// reads back masked (see TokenMask), so a channel fetched from the API
+	// cannot be posted straight back — Validate rejects the mask rather than
+	// storing it.
+	Token string `json:"token,omitempty"`
+
+	CreatedAt time.Time `json:"created_at,omitzero"`
 }
 
 // Validate checks a channel is usable.
@@ -146,14 +205,34 @@ func (c *Channel) Validate() error {
 		return fmt.Errorf("alert: channel name is required")
 	}
 	switch c.Type {
-	case ChannelWebhook, ChannelSlack:
+	case ChannelWebhook, ChannelSlack, ChannelOmniNotify:
 	default:
-		return fmt.Errorf("alert: channel type must be webhook or slack")
+		return fmt.Errorf("alert: channel type must be webhook, slack or omni-notify")
 	}
 	if !strings.HasPrefix(c.URL, "http://") && !strings.HasPrefix(c.URL, "https://") {
 		return fmt.Errorf("alert: channel URL must be an http(s) URL")
 	}
+	if c.Type == ChannelOmniNotify && strings.TrimSpace(c.Token) == "" {
+		// Omni-Notify rejects every /api/v1 call without one, so a channel
+		// saved without a token would fail on every delivery instead of at the
+		// moment the operator could still fix it.
+		return fmt.Errorf("alert: an omni-notify channel requires a token")
+	}
+	if c.Token == TokenMask {
+		// Someone read a channel back and posted it straight in. Saving the
+		// mask as the token would produce a channel that authenticates with
+		// literal bullet characters and fails on every delivery.
+		return fmt.Errorf("alert: token reads back masked; supply the real token")
+	}
 	return nil
+}
+
+// Masked returns a copy safe to serialise to a client.
+func (c Channel) Masked() Channel {
+	if c.Token != "" {
+		c.Token = TokenMask
+	}
+	return c
 }
 
 // GroupHit identifies one aggregation group that met the condition, so a

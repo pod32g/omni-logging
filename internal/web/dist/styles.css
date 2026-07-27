@@ -468,3 +468,13 @@ pre.dryrun {
   background: var(--code-bg, rgba(127,150,245,0.08)); border: 1px solid var(--border);
   font-size: 0.78rem; overflow-x: auto; max-height: 16rem;
 }
+
+/* Links. The UI had none until the Omni-Notify hint, so without this they fall
+   back to the browser default #0000EE — 2:1 against the dark background. The
+   accent token is already defined per theme and clears AA in both. */
+a { color: var(--cobalt); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; border-radius: 2px; }
+
+/* "authenticated" marker on a channel that carries a bearer token. */
+.chan-auth { font-size: .78rem; font-weight: 400; opacity: .7; margin-left: .4rem; }

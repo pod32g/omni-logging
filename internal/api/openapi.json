@@ -1470,6 +1470,18 @@
               }
             }
           },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "error",
+              "warning",
+              "info",
+              "debug"
+            ],
+            "default": "warning",
+            "description": "How bad the rule is when firing, independent of its state. Forwarded to omni-notify channels, where routes match on it."
+          },
           "channels": {
             "type": "array",
             "items": {
@@ -1523,12 +1535,17 @@
             "type": "string",
             "enum": [
               "webhook",
-              "slack"
+              "slack",
+              "omni-notify"
             ]
           },
           "url": {
             "type": "string",
-            "description": "Destination; webhook receives the full JSON payload, slack receives {text}"
+            "description": "Destination. webhook receives the full JSON payload; slack receives {text}; omni-notify receives an event POSTed to <url>/api/v1/events (the path is appended if absent)."
+          },
+          "token": {
+            "type": "string",
+            "description": "Bearer credential sent as Authorization: Bearer. Required for omni-notify. Write-only: reads back masked, and posting the mask back is rejected."
           }
         }
       },

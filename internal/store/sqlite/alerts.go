@@ -17,7 +17,7 @@ import (
 // ListRules returns every alert rule, oldest first.
 func (d *DB) ListRules(ctx context.Context) ([]alert.Rule, error) {
 	rows, err := d.ro.QueryContext(ctx, `
-		SELECT id, name, query, window_sec, interval_sec, cond_op, cond_value,
+		SELECT id, name, query, window_sec, interval_sec, cond_op, cond_value, severity,
 		       channels, enabled, state, state_since, last_eval, last_value, last_error,
 		       created_at, updated_at
 		FROM alert_rules ORDER BY created_at ASC`)
@@ -40,7 +40,7 @@ func (d *DB) ListRules(ctx context.Context) ([]alert.Rule, error) {
 // GetRule returns one rule by ID.
 func (d *DB) GetRule(ctx context.Context, id string) (alert.Rule, error) {
 	row := d.ro.QueryRowContext(ctx, `
-		SELECT id, name, query, window_sec, interval_sec, cond_op, cond_value,
+		SELECT id, name, query, window_sec, interval_sec, cond_op, cond_value, severity,
 		       channels, enabled, state, state_since, last_eval, last_value, last_error,
 		       created_at, updated_at
 		FROM alert_rules WHERE id = ?`, id)
@@ -64,10 +64,13 @@ func scanRule(s scanner) (alert.Rule, error) {
 		lastError                     sql.NullString
 	)
 	if err := s.Scan(&r.ID, &r.Name, &r.Query, &windowSec, &intervalSec,
-		&r.Cond.Op, &r.Cond.Value, &channelsJSON, &r.Enabled, &r.State,
+		&r.Cond.Op, &r.Cond.Value, &r.Severity, &channelsJSON, &r.Enabled, &r.State,
 		&stateSince, &lastEval, &r.LastValue, &lastError,
 		&created, &updated); err != nil {
 		return alert.Rule{}, err
+	}
+	if r.Severity == "" {
+		r.Severity = alert.DefaultSeverity
 	}
 	r.Window = time.Duration(windowSec) * time.Second
 	r.Interval = time.Duration(intervalSec) * time.Second
@@ -121,16 +124,17 @@ func (d *DB) PutRule(ctx context.Context, r alert.Rule) (alert.Rule, error) {
 	}
 	if _, err := d.db.ExecContext(ctx, `
 		INSERT INTO alert_rules (id, name, query, window_sec, interval_sec, cond_op, cond_value,
-		                         channels, enabled, state, state_since, last_eval, last_value,
-		                         last_error, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		                         severity, channels, enabled, state, state_since, last_eval,
+		                         last_value, last_error, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 		  name=excluded.name, query=excluded.query, window_sec=excluded.window_sec,
 		  interval_sec=excluded.interval_sec, cond_op=excluded.cond_op,
-		  cond_value=excluded.cond_value, channels=excluded.channels,
+		  cond_value=excluded.cond_value, severity=excluded.severity,
+		  channels=excluded.channels,
 		  enabled=excluded.enabled, updated_at=excluded.updated_at`,
 		r.ID, r.Name, r.Query, int64(r.Window/time.Second), int64(r.Interval/time.Second),
-		string(r.Cond.Op), r.Cond.Value, string(channels), r.Enabled, string(r.State),
+		string(r.Cond.Op), r.Cond.Value, string(r.Severity), string(channels), r.Enabled, string(r.State),
 		nanosOrZero(r.StateFrom), nanosOrZero(r.LastEval), r.LastValue, r.LastError,
 		nanosOrZero(r.CreatedAt), nanosOrZero(r.UpdatedAt)); err != nil {
 		return alert.Rule{}, fmt.Errorf("save alert rule: %w", err)
@@ -177,7 +181,7 @@ func nanosOrZero(t time.Time) int64 {
 // ListChannels returns every notification channel.
 func (d *DB) ListChannels(ctx context.Context) ([]alert.Channel, error) {
 	rows, err := d.ro.QueryContext(ctx,
-		`SELECT id, name, type, url, created_at FROM alert_channels ORDER BY created_at ASC`)
+		`SELECT id, name, type, url, token, created_at FROM alert_channels ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list alert channels: %w", err)
 	}
@@ -197,7 +201,7 @@ func (d *DB) ListChannels(ctx context.Context) ([]alert.Channel, error) {
 // GetChannel returns one channel by ID.
 func (d *DB) GetChannel(ctx context.Context, id string) (alert.Channel, error) {
 	row := d.ro.QueryRowContext(ctx,
-		`SELECT id, name, type, url, created_at FROM alert_channels WHERE id = ?`, id)
+		`SELECT id, name, type, url, token, created_at FROM alert_channels WHERE id = ?`, id)
 	c, err := scanChannel(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return alert.Channel{}, alert.ErrNotFound
@@ -210,7 +214,7 @@ func scanChannel(s scanner) (alert.Channel, error) {
 		c       alert.Channel
 		created int64
 	)
-	if err := s.Scan(&c.ID, &c.Name, &c.Type, &c.URL, &created); err != nil {
+	if err := s.Scan(&c.ID, &c.Name, &c.Type, &c.URL, &c.Token, &created); err != nil {
 		return alert.Channel{}, err
 	}
 	c.CreatedAt = unixOrZero(created)
@@ -224,9 +228,10 @@ func (d *DB) PutChannel(ctx context.Context, c alert.Channel) (alert.Channel, er
 		c.CreatedAt = time.Now().UTC()
 	}
 	if _, err := d.db.ExecContext(ctx, `
-		INSERT INTO alert_channels (id, name, type, url, created_at) VALUES (?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, url=excluded.url`,
-		c.ID, c.Name, string(c.Type), c.URL, nanosOrZero(c.CreatedAt)); err != nil {
+		INSERT INTO alert_channels (id, name, type, url, token, created_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, url=excluded.url,
+		  token=excluded.token`,
+		c.ID, c.Name, string(c.Type), c.URL, c.Token, nanosOrZero(c.CreatedAt)); err != nil {
 		return alert.Channel{}, fmt.Errorf("save alert channel: %w", err)
 	}
 	return c, nil

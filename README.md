@@ -14,7 +14,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Storage + full-text index** — SQLite with FTS5; time/field indexes; retention.
 - **Search** — free-text, field filters (`level=error service=api`), time ranges.
 - **Aggregations** — a piped analytics stage (`| stats count by service`, `timechart`, `top`, `rare`), plus the counts-over-time histogram and field facets.
-- **Alerting** — scheduled rules over any search or aggregation, with threshold conditions and webhook/Slack notifications on state transitions.
+- **Alerting** — scheduled rules over any search or aggregation, with threshold conditions, per-rule severity, and notifications on state transitions via webhook, Slack, or [Omni-Notify](https://github.com/pod32g/omni-notify) (which handles dedup, routing and delivery to Discord/Telegram/SMTP).
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
 - **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server, with an optional durable spool for at-least-once delivery across restarts and outages.
@@ -427,13 +427,74 @@ curl -XPOST localhost:8080/api/v1/alerts/<rule-id>/test
   is not the same as "fine", and it does not send a resolved notification.
 - **Dead-man's switch** — because an empty aggregate compares as zero,
   `service=heartbeat | stats count` with `lt 1` alerts when a service goes quiet.
-- **Channels** are `webhook` (receives the full JSON payload) or `slack`
-  (receives `{"text": ...}`). Redirects are deliberately not followed, so a
-  payload cannot be diverted to a host you did not configure.
+- **Severity** — `critical`, `error`, `warning` (default), `info`, `debug`. It
+  is independent of state: severity is how bad the rule is, state is whether it
+  is firing right now. Downstream routing matches on it.
+- **Channels** are `webhook` (receives the full JSON payload), `slack`
+  (receives `{"text": ...}`) or `omni-notify` (see below). Redirects are
+  deliberately not followed, so a payload cannot be diverted to a host you did
+  not configure.
 
 > Alert channels make the server issue outbound HTTP requests to URLs you
 > supply. The endpoints are behind the admin token for that reason; treat the
 > ability to create a channel as equivalent to outbound request access.
+
+### Omni-Notify
+
+[Omni-Notify](https://github.com/pod32g/omni-notify) is a notification router:
+it deduplicates, routes and delivers to Discord, Telegram, Slack, SMTP and
+webhooks, with a durable queue and retries — and it deliberately does not
+evaluate rules. That is the complementary half of what this server does, so an
+`omni-notify` channel hands off at exactly that seam rather than growing a
+provider zoo and a retry queue here.
+
+```sh
+curl -XPOST localhost:8080/api/v1/alerts/channels -H 'Content-Type: application/json' \
+  -d '{"name":"homelab","type":"omni-notify",
+       "url":"http://omni-notify:8088","token":"<OMNI_NOTIFY_API_TOKEN>"}'
+```
+
+The URL is the Omni-Notify **base** URL; `/api/v1/events` is appended if you
+leave it off. The token is its `OMNI_NOTIFY_API_TOKEN`, sent as
+`Authorization: Bearer`. It is **write-only**: it reads back masked, and posting
+the mask back is rejected rather than stored.
+
+Each transition becomes one Omni-Notify event:
+
+| Omni-Notify field | From |
+|---|---|
+| `event_id` | the rule's ID |
+| `type` | always `alert` |
+| `source` | always `omni-logging` |
+| `status` | `firing` / `resolved` |
+| `severity` | the rule's severity |
+| `title` / `summary` / `description` | rule name, threshold line, full text with the breaching groups |
+| `labels` | `rule`, `rule_id` — **identity only** |
+| `annotations` | `query`, `condition`, `window`, `value`, `groups`, `top_group` |
+
+Route them on the Omni-Notify side with `source: omni-logging`, or by
+`severity`, or per-rule with `labels.rule`.
+
+> **Why labels carry nothing but identity.** Omni-Notify's dedup key is
+> `sha256(type | source | event_id | sorted labels)`. If a label held the
+> observed value or which groups broke, the resolved event would fingerprint
+> differently from the firing one, Omni-Notify would treat it as a resolve for
+> something that never fired, suppress it — and the alert would stay active
+> there forever. Everything that varies between evaluations goes in
+> annotations, which are still matchable for routing but sit outside the
+> fingerprint.
+
+Omni-Notify can also tee **its own logs** back here, so the two compose in both
+directions: it ships logs to `/api/v1/ingest`, this server ships alerts to its
+event API. That makes its delivery failures alertable like anything else:
+
+```
+service=omni-notify level=error "delivery permanently failed" | stats count
+```
+
+> Route that one somewhere else. A rule about Omni-Notify being unwell, notified
+> *through* Omni-Notify, is the one alert guaranteed not to arrive — give it a
+> `slack` or `webhook` channel instead.
 
 ### Syslog collector
 

@@ -34,6 +34,7 @@ type ruleDTO struct {
 	WindowSeconds   int64           `json:"window_seconds"`
 	IntervalSeconds int64           `json:"interval_seconds"`
 	Condition       alert.Condition `json:"condition"`
+	Severity        alert.Severity  `json:"severity,omitempty"`
 	Channels        []string        `json:"channels"`
 	Enabled         bool            `json:"enabled"`
 
@@ -51,7 +52,7 @@ func toRuleDTO(r alert.Rule) ruleDTO {
 		ID: r.ID, Name: r.Name, Query: r.Query,
 		WindowSeconds:   int64(r.Window / time.Second),
 		IntervalSeconds: int64(r.Interval / time.Second),
-		Condition:       r.Cond, Channels: r.Channels, Enabled: r.Enabled,
+		Condition:       r.Cond, Severity: r.Severity, Channels: r.Channels, Enabled: r.Enabled,
 		State: r.State, StateFrom: r.StateFrom, LastEval: r.LastEval,
 		LastValue: r.LastValue, LastError: r.LastError,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
@@ -66,7 +67,7 @@ func (d ruleDTO) toRule() alert.Rule {
 		ID: d.ID, Name: d.Name, Query: d.Query,
 		Window:   time.Duration(d.WindowSeconds) * time.Second,
 		Interval: time.Duration(d.IntervalSeconds) * time.Second,
-		Cond:     d.Condition, Channels: d.Channels, Enabled: d.Enabled,
+		Cond:     d.Condition, Severity: d.Severity, Channels: d.Channels, Enabled: d.Enabled,
 	}
 }
 
@@ -169,10 +170,13 @@ func (s *Server) handleChannelsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not list channels", http.StatusInternalServerError)
 		return
 	}
-	if channels == nil {
-		channels = []alert.Channel{}
+	// Masked: a channel's token is a bearer credential for another service, and
+	// this endpoint is unauthenticated when no admin token is configured.
+	masked := make([]alert.Channel, 0, len(channels))
+	for _, c := range channels {
+		masked = append(masked, c.Masked())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"channels": channels})
+	writeJSON(w, http.StatusOK, map[string]any{"channels": masked})
 }
 
 func (s *Server) handleChannelCreate(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +196,7 @@ func (s *Server) handleChannelCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info("alert channel created", "channel", saved.Name, "type", saved.Type)
-	writeJSON(w, http.StatusCreated, saved)
+	writeJSON(w, http.StatusCreated, saved.Masked())
 }
 
 func (s *Server) handleChannelDelete(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +217,9 @@ func (s *Server) handleChannelTest(w http.ResponseWriter, r *http.Request) {
 	}
 	note := alert.Notification{
 		Rule:      "Test notification",
+		RuleID:    "test",
 		State:     alert.StateFiring,
+		Severity:  alert.SeverityInfo,
 		Value:     1,
 		Condition: "> 0",
 		Query:     "(test)",

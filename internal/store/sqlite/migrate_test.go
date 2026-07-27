@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/pod32g/omni-logging/internal/alert"
 	"github.com/pod32g/omni-logging/internal/model"
 	"github.com/pod32g/omni-logging/internal/query"
 )
@@ -178,3 +180,119 @@ func TestMigrate_RefusesNewerDB(t *testing.T) {
 // ensure the model/query imports are used even if a future edit drops a case.
 var _ = model.LevelError
 var _ = query.OrderNewest
+
+// TestMigrate_V5AlertColumnsUpgrade simulates a database written before alert
+// severities and channel tokens existed — the shape a running deployment has —
+// and checks the upgrade keeps existing rules and channels intact rather than
+// dropping and recreating the tables.
+func TestMigrate_V5AlertColumnsUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+
+	// Build the schema up to v5 with the real migrations, then rewind the
+	// recorded version so the new one runs against genuinely old tables.
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := db.PutChannel(ctx, alert.Channel{
+		Name: "legacy hook", Type: alert.ChannelWebhook, URL: "http://example.invalid/hook",
+	}); err != nil {
+		t.Fatalf("seed channel: %v", err)
+	}
+	rule, err := db.PutRule(ctx, alert.Rule{
+		Name: "legacy rule", Query: "level=error", Window: 5 * time.Minute,
+		Interval: time.Minute, Cond: alert.Condition{Op: alert.OpGT, Value: 1}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+	db.Close()
+
+	// A rule stored before the column existed must read back with the default
+	// severity, not an empty string: an empty severity would fall through every
+	// severity-matching route in a downstream notifier.
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+
+	if v, _ := db.SchemaVersion(ctx); v != latestSchemaVersion() {
+		t.Fatalf("upgraded to version %d, want %d", v, latestSchemaVersion())
+	}
+
+	got, err := db.GetRule(ctx, rule.ID)
+	if err != nil {
+		t.Fatalf("the pre-existing rule was lost: %v", err)
+	}
+	if got.Name != "legacy rule" {
+		t.Errorf("rule name = %q", got.Name)
+	}
+	if got.Severity != alert.DefaultSeverity {
+		t.Errorf("migrated rule severity = %q, want the default %q", got.Severity, alert.DefaultSeverity)
+	}
+
+	channels, err := db.ListChannels(ctx)
+	if err != nil || len(channels) != 1 {
+		t.Fatalf("the pre-existing channel was lost: %v (%d channels)", err, len(channels))
+	}
+	if channels[0].Token != "" {
+		t.Errorf("a migrated channel should have an empty token, got %q", channels[0].Token)
+	}
+}
+
+// TestChannelTokenRoundTrips: the token must survive storage, or every
+// omni-notify delivery would be unauthenticated.
+func TestChannelTokenRoundTrips(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	saved, err := db.PutChannel(ctx, alert.Channel{
+		Name: "notify", Type: alert.ChannelOmniNotify,
+		URL: "http://notify:8088", Token: "secret-token",
+	})
+	if err != nil {
+		t.Fatalf("PutChannel: %v", err)
+	}
+	got, err := db.GetChannel(ctx, saved.ID)
+	if err != nil {
+		t.Fatalf("GetChannel: %v", err)
+	}
+	if got.Token != "secret-token" {
+		t.Errorf("token = %q, want it stored verbatim (masking happens at the API edge)", got.Token)
+	}
+	if got.Type != alert.ChannelOmniNotify {
+		t.Errorf("type = %q", got.Type)
+	}
+}
+
+func TestRuleSeverityRoundTrips(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	saved, err := db.PutRule(ctx, alert.Rule{
+		Name: "crit", Query: "level=fatal", Window: 5 * time.Minute, Interval: time.Minute,
+		Cond: alert.Condition{Op: alert.OpGT, Value: 0}, Severity: alert.SeverityCritical, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("PutRule: %v", err)
+	}
+	got, err := db.GetRule(ctx, saved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Severity != alert.SeverityCritical {
+		t.Errorf("severity = %q, want critical", got.Severity)
+	}
+
+	// And an update must not silently reset it.
+	got.Name = "crit renamed"
+	if _, err := db.PutRule(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := db.GetRule(ctx, saved.ID)
+	if again.Severity != alert.SeverityCritical {
+		t.Errorf("severity after update = %q, want critical", again.Severity)
+	}
+}
