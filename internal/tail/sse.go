@@ -92,6 +92,11 @@ func Handler(opts Options) http.HandlerFunc {
 		flusher.Flush()
 
 		ctx := r.Context()
+		// Set by the browser on an automatic reconnect. Everything up to and
+		// including this ID has already been delivered, so replaying it would
+		// duplicate rows the client is still showing.
+		lastSeen := r.Header.Get("Last-Event-ID")
+
 		replayed := map[string]struct{}{}
 		if opts.Backfill != nil {
 			events, berr := opts.Backfill(ctx, q, limit)
@@ -104,6 +109,12 @@ func Handler(opts Options) http.HandlerFunc {
 				// Search returns newest first; emit oldest first so the pane
 				// fills top-down the way a log file reads.
 				for i := len(events) - 1; i >= 0; i-- {
+					// ULIDs sort lexicographically by time, so "already seen"
+					// is a string comparison rather than a timestamp parse.
+					if lastSeen != "" && events[i].ID <= lastSeen {
+						replayed[events[i].ID] = struct{}{}
+						continue
+					}
 					if !writeEvent(w, flusher, events[i]) {
 						return
 					}
@@ -158,12 +169,18 @@ func Handler(opts Options) http.HandlerFunc {
 // writeEvent emits one event as an SSE data frame. It reports false when the
 // event could not be serialized into a frame at all, which should not happen for
 // a stored event and leaves the stream in an unknown state if it does.
+//
+// The id: line is what makes a reconnect cheap. EventSource remembers the last
+// id it saw and sends it back as Last-Event-ID, so the server can resume rather
+// than replaying its whole backfill — which is what made a dropped connection
+// show up as dozens of duplicated rows.
 func writeEvent(w http.ResponseWriter, flusher http.Flusher, e model.LogEvent) bool {
 	data, err := json.Marshal(e)
 	if err != nil {
 		return true // skip this one; the stream itself is still fine
 	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+	// IDs are ULIDs: no newlines, so they cannot break out of the field.
+	if _, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", e.ID, data); err != nil {
 		return false
 	}
 	flusher.Flush()

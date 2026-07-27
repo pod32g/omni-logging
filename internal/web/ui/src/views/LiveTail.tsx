@@ -6,6 +6,9 @@ import { EventList } from "../components/EventList";
 
 const MAX_ROWS = 500;
 
+/** What the stream is actually doing, as opposed to what we wish it were doing. */
+type Status = "connecting" | "live" | "reconnecting" | "paused";
+
 interface Props {
   active: boolean;
   onFilter: (term: string) => void;
@@ -19,10 +22,16 @@ export function LiveTail({ active, onFilter }: Props) {
   const [streamed, setStreamed] = useState(0);
   const [eps, setEps] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [status, setStatus] = useState<Status>("connecting");
 
   const esRef = useRef<EventSource | null>(null);
   const epsWindow = useRef<number[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
+  // IDs already on screen. A reconnect can redeliver events — the server
+  // resumes from Last-Event-ID, but a proxy that drops the header would replay
+  // the whole backfill — and a duplicate id becomes a duplicate React key,
+  // which leaves orphaned rows in the DOM and breaks the MAX_ROWS cap.
+  const seen = useRef<Set<string>>(new Set());
 
   // The stream is opened only while the view is visible and unpaused, so
   // leaving the tab does not keep a subscriber (and its buffer) alive server-side.
@@ -30,8 +39,10 @@ export function LiveTail({ active, onFilter }: Props) {
     if (!active || paused) {
       esRef.current?.close();
       esRef.current = null;
+      setStatus(paused ? "paused" : "connecting");
       return;
     }
+    setStatus("connecting");
     const p = new URLSearchParams();
     if (applied) p.set("q", applied);
     // EventSource cannot set headers, which is why this endpoint alone accepts
@@ -40,6 +51,7 @@ export function LiveTail({ active, onFilter }: Props) {
     if (t) p.set("token", t);
 
     const es = new EventSource(`/api/v1/tail?${p.toString()}`);
+    es.onopen = () => setStatus("live");
     es.onmessage = (msg) => {
       let e: LogEvent;
       try {
@@ -47,11 +59,30 @@ export function LiveTail({ active, onFilter }: Props) {
       } catch {
         return;
       }
+      // A redelivered event is not new traffic: counting it would inflate the
+      // rate and duplicate the row.
+      if (e.id && seen.current.has(e.id)) return;
+      if (e.id) seen.current.add(e.id);
+
+      setStatus("live");
       epsWindow.current.push(Date.now());
       setStreamed((n) => n + 1);
-      setEvents((prev) => [e, ...prev].slice(0, MAX_ROWS));
+      setEvents((prev) => {
+        const next = [e, ...prev].slice(0, MAX_ROWS);
+        // Keep the id set bounded to what is actually on screen, or it grows
+        // for the lifetime of the tab.
+        if (seen.current.size > MAX_ROWS * 2) {
+          seen.current = new Set(next.map((x) => x.id).filter(Boolean) as string[]);
+        }
+        return next;
+      });
     };
-    es.onerror = () => { /* the browser reconnects on its own */ };
+    // EventSource retries on its own, but silently — saying "LIVE" through an
+    // outage is how a dropped stream looks like no logs rather than no
+    // connection.
+    es.onerror = () => {
+      setStatus(es.readyState === EventSource.CLOSED ? "connecting" : "reconnecting");
+    };
     esRef.current = es;
     return () => {
       es.close();
@@ -84,6 +115,7 @@ export function LiveTail({ active, onFilter }: Props) {
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 setEvents([]);
+                seen.current = new Set();
                 setApplied(filter.trim());
               }
             }}
@@ -97,9 +129,21 @@ export function LiveTail({ active, onFilter }: Props) {
           <i className="pause" />
           <span>{paused ? "Resume" : "Pause"}</span>
         </button>
-        <button className={`live${paused ? " paused" : ""}`} id="tail-toggle">
+        <button
+          className={`live${status === "paused" ? " paused" : ""}${status === "reconnecting" || status === "connecting" ? " reconnecting" : ""}`}
+          id="tail-toggle"
+          title={
+            status === "live"
+              ? "Connected"
+              : status === "paused"
+                ? "Paused — the stream is closed"
+                : "The connection dropped; retrying"
+          }
+        >
           <i className="dot dot-live" />
-          <span>{paused ? "PAUSED" : "LIVE"}</span>
+          <span>
+            {status === "paused" ? "PAUSED" : status === "live" ? "LIVE" : "RECONNECTING"}
+          </span>
         </button>
       </div>
 

@@ -196,3 +196,110 @@ func TestNoBackfillConfigured(t *testing.T) {
 		t.Fatalf("stream never opened:\n%s", body)
 	}
 }
+
+// runStreamWithHeaders is runStream with request headers, so a reconnect can be
+// simulated the way a browser makes one.
+func runStreamWithHeaders(t *testing.T, opts Options, url string, headers map[string]string, drive func(cancel func())) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Handler(opts)(rr, req)
+	}()
+	drive(cancel)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not return")
+	}
+	return rr.Body.String()
+}
+
+// TestStreamEmitsEventIDs: without an id: line the browser has nothing to send
+// back as Last-Event-ID, so every reconnect replays the entire backfill.
+func TestStreamEmitsEventIDs(t *testing.T) {
+	hub := NewHub()
+	now := time.Now()
+	opts := Options{
+		Hub: hub,
+		Backfill: func(context.Context, query.Query, int) ([]model.LogEvent, error) {
+			return []model.LogEvent{evt("01B", "second", now), evt("01A", "first", now)}, nil
+		},
+	}
+	body := runStream(t, opts, "/api/v1/tail", func(cancel func()) {
+		waitForSubscriber(t, hub)
+		cancel()
+	})
+	for _, want := range []string{"id: 01A\n", "id: 01B\n"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stream is missing %q; the client cannot resume without it\n%s", want, body)
+		}
+	}
+}
+
+// TestReconnectResumesInsteadOfReplaying is the fix for what a dropped stream
+// looked like from the UI: the browser reconnects automatically, the server
+// replayed all 50 backfill events, and the pane filled with duplicates of rows
+// already on screen.
+func TestReconnectResumesInsteadOfReplaying(t *testing.T) {
+	hub := NewHub()
+	now := time.Now()
+	history := []model.LogEvent{ // newest first, as search returns
+		evt("01D", "newest", now),
+		evt("01C", "third", now),
+		evt("01B", "second", now),
+		evt("01A", "oldest", now),
+	}
+	opts := Options{
+		Hub: hub,
+		Backfill: func(context.Context, query.Query, int) ([]model.LogEvent, error) {
+			return history, nil
+		},
+	}
+
+	// A reconnect saying "I already have everything up to 01B".
+	body := runStreamWithHeaders(t, opts, "/api/v1/tail",
+		map[string]string{"Last-Event-ID": "01B"},
+		func(cancel func()) { waitForSubscriber(t, hub); cancel() })
+
+	for _, gone := range []string{"oldest", "second"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("replayed %q, which the client already had\n%s", gone, body)
+		}
+	}
+	for _, want := range []string{"third", "newest"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dropped %q, which the client had not seen\n%s", want, body)
+		}
+	}
+}
+
+// TestFirstConnectStillGetsFullHistory: the resume logic must not starve a
+// genuinely new stream, which sends no Last-Event-ID.
+func TestFirstConnectStillGetsFullHistory(t *testing.T) {
+	hub := NewHub()
+	now := time.Now()
+	opts := Options{
+		Hub: hub,
+		Backfill: func(context.Context, query.Query, int) ([]model.LogEvent, error) {
+			return []model.LogEvent{evt("01B", "second", now), evt("01A", "first", now)}, nil
+		},
+	}
+	body := runStream(t, opts, "/api/v1/tail", func(cancel func()) {
+		waitForSubscriber(t, hub)
+		cancel()
+	})
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("a fresh stream should replay %q\n%s", want, body)
+		}
+	}
+}

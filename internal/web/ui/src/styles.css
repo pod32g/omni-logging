@@ -588,3 +588,7 @@ select { cursor: pointer; }
 .view-host { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .view-host[hidden] { display: none !important; }
 #root { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* A stream that has dropped must not look like a stream with nothing to say. */
+.live.reconnecting { color: var(--warn); }
+.live.reconnecting .dot-live { background: var(--warn); }
