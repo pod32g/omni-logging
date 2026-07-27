@@ -2,6 +2,8 @@ package web
 
 import (
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,5 +85,66 @@ func TestExportDoesNotLeakTokenInURL(t *testing.T) {
 	}
 	if !strings.Contains(js, "createObjectURL") {
 		t.Error("app.js export download missing Blob (URL.createObjectURL) save path")
+	}
+}
+
+// TestEmbeddedUIHasOverviewAndPalette guards the redesigned shell is embedded:
+// the Overview landing view, the command palette, and the filter strip that
+// replaced the facets sidebar.
+func TestEmbeddedUIHasOverviewAndPalette(t *testing.T) {
+	html := readAsset(t, "index.html")
+	for _, want := range []string{
+		`data-view="dash"`, `id="view-dash"`, `id="dash-tiles"`,
+		`id="palette"`, `id="pal-input"`, `id="filterbar"`, `id="bars-wrap"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	js := readAsset(t, "app.js")
+	for _, want := range []string{"function loadDash", "function openPalette", "function setQueryRange"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+}
+
+// TestDarkThemeIsNeutral pins the palette decision: the dark ground is a real
+// black rather than the blue-tinted near-black it used to be, and the interface
+// carries no blue or purple chrome. Colour is reserved for severity, so a
+// coloured pixel should mean something.
+func TestDarkThemeIsNeutral(t *testing.T) {
+	css := readAsset(t, "styles.css")
+
+	// The old blue-tinted surfaces and cobalt accent must be gone.
+	for _, gone := range []string{"#0E1117", "#161B24", "#2348E0", "#6B8AFF", "--cobalt"} {
+		if strings.Contains(css, gone) {
+			t.Errorf("styles.css still contains the blue-tinted token %q", gone)
+		}
+	}
+
+	// Every hex colour outside the severity block must be a neutral grey —
+	// equal R, G and B. A hue anywhere else is the thing this test exists to
+	// catch.
+	hex := regexp.MustCompile(`#([0-9A-Fa-f]{6})\b`)
+	for _, line := range strings.Split(css, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "/*") {
+			continue
+		}
+		// Severity and the one status green are allowed to have hue.
+		if strings.Contains(line, "--error") || strings.Contains(line, "--warn") ||
+			strings.Contains(line, "--fatal") || strings.Contains(line, "--ok") ||
+			strings.Contains(line, "--banner") {
+			continue
+		}
+		for _, m := range hex.FindAllStringSubmatch(line, -1) {
+			r, _ := strconv.ParseInt(m[1][0:2], 16, 0)
+			g, _ := strconv.ParseInt(m[1][2:4], 16, 0)
+			b, _ := strconv.ParseInt(m[1][4:6], 16, 0)
+			if r != g || g != b {
+				t.Errorf("non-neutral chrome colour %s in %q — chrome must be greyscale", m[0], trimmed)
+			}
+		}
 	}
 }

@@ -19,10 +19,12 @@ function svgPath(cls, d) {
   return svg;
 }
 
-const LEVELS = ["error", "warn", "info", "debug", "fatal"];
-const LEVEL_COLOR = {
-  error: "#DC2626", warn: "#D97706", info: "#2563EB", debug: "#9AA3B2", fatal: "#7C2D12",
-};
+const LEVELS = ["fatal", "error", "warn", "info", "debug"];
+// Read from the stylesheet so the palette lives in exactly one place. Severity
+// is the only thing in this UI that carries colour.
+function levelColor(lvl) {
+  return getComputedStyle(document.documentElement).getPropertyValue("--" + lvl).trim() || "#8A8A8A";
+}
 
 function token() { return localStorage.getItem("omnilog_token") || ""; }
 function setToken(t) { localStorage.setItem("omnilog_token", t); }
@@ -64,18 +66,54 @@ function fmtTs(iso) {
 }
 function fmtNum(n) { return (n || 0).toLocaleString("en-US"); }
 
+// Rows show a time only. Repeating the date on all 200 of them costs a column
+// and tells you nothing — it moves to a separator whenever the day changes.
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+function fmtClock(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function dayKey(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function dayLabel(iso) {
+  const key = dayKey(iso);
+  const today = dayKey(new Date().toISOString());
+  const yest = dayKey(new Date(Date.now() - 86400000).toISOString());
+  if (key === today) return "Today · " + key;
+  if (key === yest) return "Yesterday · " + key;
+  return key;
+}
+
 // ---------- view switching ----------
-const views = { search: $("#view-search"), tail: $("#view-tail"), alerts: $("#view-alerts"), settings: $("#view-settings") };
+const views = {
+  dash: $("#view-dash"), search: $("#view-search"), tail: $("#view-tail"),
+  alerts: $("#view-alerts"), settings: $("#view-settings"),
+};
+let searchLoaded = false;
+
+function navTo(v) {
+  if (!views[v]) return;
+  document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("is-active", b.dataset.view === v));
+  Object.entries(views).forEach(([name, elm]) => { elm.hidden = name !== v; });
+  if (v === "tail") startTail(); else stopTail();
+  if (v === "settings") loadSettings();
+  if (v === "alerts") loadAlerts();
+  if (v === "dash") loadDash();
+  if (v === "search" && !searchLoaded) { searchLoaded = true; runSearch(); }
+}
 document.querySelectorAll(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("is-active"));
-    btn.classList.add("is-active");
-    const v = btn.dataset.view;
-    Object.entries(views).forEach(([name, elm]) => { elm.hidden = name !== v; });
-    if (v === "tail") startTail(); else stopTail();
-    if (v === "settings") loadSettings();
-    if (v === "alerts") loadAlerts();
-  });
+  btn.addEventListener("click", () => navTo(btn.dataset.view));
 });
 
 // ---------- token bar ----------
@@ -317,9 +355,18 @@ function bucketFor(range) {
   }
 }
 
+let lastDay = "";   // day of the most recently appended row, for separators
+
 function renderResults(res, append) {
-  if (!append) rowsEl.replaceChildren();
-  (res.events || []).forEach((e) => rowsEl.appendChild(renderRow(e)));
+  if (!append) { rowsEl.replaceChildren(); lastDay = ""; }
+  (res.events || []).forEach((e) => {
+    const day = dayKey(e.timestamp);
+    if (day && day !== lastDay) {
+      rowsEl.appendChild(el("div", "day-sep", dayLabel(e.timestamp)));
+      lastDay = day;
+    }
+    rowsEl.appendChild(renderRow(e));
+  });
   const shown = rowsEl.children.length;
   // The server stops counting past a cap rather than walking an unbounded
   // match set, so a capped total is a lower bound: show it as "50,000+".
@@ -334,14 +381,17 @@ function renderResults(res, append) {
 function renderRow(e) {
   const lvl = (e.level || "info").toLowerCase();
   const row = el("div", `row lvl-${lvl}`);
+  row.dataset.ts = e.timestamp || "";
 
   const line = el("div", "row-line");
-  line.appendChild(el("span", "row-ts", fmtTs(e.timestamp)));
-  const lvlCell = el("span", "row-level");
-  lvlCell.appendChild(el("span", `badge ${lvl}`, lvl));
-  line.appendChild(lvlCell);
-  line.appendChild(el("span", "row-svc", e.service || "—"));
-  line.appendChild(el("span", "row-msg", e.message || e.raw || ""));
+  line.appendChild(el("span", "row-ts", fmtTime(e.timestamp)));
+  line.appendChild(el("span", "row-level", lvl));
+  const svc = el("span", "row-svc", e.service || "—");
+  svc.title = e.service || "";
+  line.appendChild(svc);
+  const msg = el("span", "row-msg", e.message || e.raw || "");
+  msg.title = e.message || e.raw || "";
+  line.appendChild(msg);
   line.appendChild(svgPath("chev", "M18 15l-6-6-6 6"));
   row.appendChild(line);
 
@@ -354,6 +404,14 @@ function renderRow(e) {
     const chip = el("span", "attr-chip");
     chip.appendChild(el("b", null, k + "="));
     chip.appendChild(document.createTextNode(String(meta[k])));
+    // Clicking narrows the search by that field, which is the whole reason to
+    // have expanded the row.
+    chip.title = "Filter by this";
+    chip.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const frag = (k === "source" ? "source=" : "attr." + k + "=") + String(meta[k]);
+      addToQuery(frag);
+    });
     chips.appendChild(chip);
   });
   if (chips.children.length) detail.appendChild(chips);
@@ -375,6 +433,8 @@ function renderStats(stats) {
   $("#hist-sub").textContent = h.length
     ? `${fmtTs(h[0].start)} – ${fmtTs(h[h.length - 1].start)}`
     : "no data in range";
+  $("#hist-axis-l").textContent = h.length ? fmtClock(h[0].start) : "";
+  $("#hist-axis-r").textContent = h.length ? fmtClock(h[h.length - 1].start) : "";
 }
 
 // fillBuckets inserts zero-count buckets into gaps so the histogram renders as
@@ -394,65 +454,80 @@ function fillBuckets(hist) {
   return out;
 }
 
-function renderBars(rawHist) {
+let histBuckets = [];  // the rendered buckets, so the brush can map x -> time
+
+function renderBars(rawHist, host, keep) {
   const hist = fillBuckets(rawHist);
-  const bars = $("#bars");
+  const bars = host || $("#bars");
   bars.replaceChildren();
   const max = Math.max(1, ...hist.map((b) => b.count));
   hist.forEach((b) => {
     const bar = el("div", "bar");
     const norm = el("div", "norm");
-    norm.style.height = Math.round((b.count / max) * 92) + "px";
+    norm.style.height = Math.max(b.count > 0 ? 2 : 0, Math.round((b.count / max) * 62)) + "px";
     bar.title = `${fmtTs(b.start)} · ${fmtNum(b.count)} events`;
     bar.appendChild(norm);
     bars.appendChild(bar);
   });
+  if (keep !== false) histBuckets = hist;
+  return hist;
 }
 
+// The sidebar of facet bars is gone; counts live inline above the results as
+// toggle chips. Same information, a fraction of the space, and the results get
+// the full width — which is what you are actually here to read.
 function renderFacets(facets) {
   const levelsEl = $("#facet-levels");
   levelsEl.replaceChildren();
   const levelMap = {};
   (facets.level || []).forEach((f) => (levelMap[f.value] = f.count));
-  const maxLevel = Math.max(1, ...Object.values(levelMap));
   LEVELS.forEach((lvl) => {
     if (levelMap[lvl] == null) return;
-    levelsEl.appendChild(facetRow(lvl, levelMap[lvl], maxLevel, LEVEL_COLOR[lvl], false, "level=" + lvl));
+    levelsEl.appendChild(filterChip(lvl, levelMap[lvl], levelColor(lvl), "level=" + lvl));
   });
 
   const svcEl = $("#facet-services");
   svcEl.replaceChildren();
-  const svc = facets.service || [];
-  const maxSvc = Math.max(1, ...svc.map((f) => f.count));
-  svc.slice(0, 8).forEach((f) => {
+  (facets.service || []).slice(0, 5).forEach((f) => {
     if (!f.value) return;
-    svcEl.appendChild(facetRow(f.value, f.count, maxSvc, null, true, "service=" + f.value));
+    svcEl.appendChild(filterChip(f.value, f.count, null, "service=" + f.value));
   });
 }
 
-function facetRow(name, count, max, color, mono, queryFrag) {
-  const f = el("div", "facet");
-  const top = el("div", "facet-top");
+function filterChip(name, count, color, queryFrag) {
+  const c = el("button", "lvl-chip");
   if (color) {
-    const sw = el("span", "facet-swatch");
+    const sw = el("i");
     sw.style.background = color;
-    top.appendChild(sw);
+    c.appendChild(sw);
   }
-  top.appendChild(el("span", "facet-name" + (mono ? " mono" : ""), name));
-  top.appendChild(el("span", "facet-count", fmtNum(count)));
-  f.appendChild(top);
-  const bar = el("div", "facet-bar");
-  const fill = el("i");
-  fill.style.width = Math.round((count / max) * 100) + "%";
-  fill.style.background = color || "#2348E0";
-  bar.appendChild(fill);
-  f.appendChild(bar);
-  f.addEventListener("click", () => {
-    const q = $("#q");
-    if (!q.value.includes(queryFrag)) q.value = (q.value + " " + queryFrag).trim();
-    runSearch();
-  });
-  return f;
+  c.appendChild(document.createTextNode(name));
+  c.appendChild(el("b", null, fmtNum(count)));
+  // A chip is a toggle: clicking an active filter takes it back off, so you can
+  // undo without editing the query text by hand.
+  if (queryIncludes(queryFrag)) c.classList.add("is-on");
+  c.addEventListener("click", () => toggleQueryFrag(queryFrag));
+  return c;
+}
+
+function queryIncludes(frag) {
+  return $("#q").value.split(/\s+/).includes(frag);
+}
+
+function addToQuery(frag) {
+  const q = $("#q");
+  if (!queryIncludes(frag)) q.value = (q.value + " " + frag).trim();
+  navTo("search");
+  runSearch();
+}
+
+function toggleQueryFrag(frag) {
+  const q = $("#q");
+  const parts = q.value.split(/\s+/).filter(Boolean);
+  const i = parts.indexOf(frag);
+  if (i >= 0) parts.splice(i, 1); else parts.push(frag);
+  q.value = parts.join(" ");
+  runSearch();
 }
 
 $("#search-form").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
@@ -641,7 +716,7 @@ $("#cfg-token-save").addEventListener("click", () => { setToken($("#cfg-admintok
 document.querySelectorAll("#theme-seg button").forEach((b) => b.addEventListener("click", () => setTheme(b.dataset.themeSet)));
 
 // ---------- boot ----------
-runSearch();
+navTo("dash");
 
 // ---------- ALERTS ----------
 // Rules are edited in a single inline form rather than a modal: the list, the
@@ -925,3 +1000,350 @@ $("#al-cancel").addEventListener("click", () => { $("#al-editor").hidden = true;
 $("#al-save").addEventListener("click", saveRule);
 $("#al-dryrun").addEventListener("click", dryRunRule);
 $("#al-chan-add").addEventListener("click", addChannel);
+
+
+// ---------- histogram brush: drag to narrow the time range ----------
+// Dragging writes from=/to= into the query rather than holding a hidden bit of
+// state, so the selected window is visible, editable and shareable as a URL —
+// and the query's own bounds beat the range picker server-side.
+(function initBrush() {
+  const wrap = $("#bars-wrap");
+  if (!wrap) return;
+  let startX = null, box = null;
+
+  const xToTime = (x) => {
+    if (!histBuckets.length) return null;
+    const r = wrap.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (x - r.left) / r.width));
+    const i = Math.min(histBuckets.length - 1, Math.floor(frac * histBuckets.length));
+    return new Date(histBuckets[i].start).getTime();
+  };
+  const step = () => {
+    if (histBuckets.length < 2) return 60000;
+    return new Date(histBuckets[1].start).getTime() - new Date(histBuckets[0].start).getTime();
+  };
+
+  wrap.addEventListener("mousedown", (e) => {
+    if (!histBuckets.length) return;
+    startX = e.clientX;
+    box = el("div", "brush");
+    wrap.appendChild(box);
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (startX == null || !box) return;
+    const r = wrap.getBoundingClientRect();
+    const a = Math.max(r.left, Math.min(startX, e.clientX));
+    const b = Math.min(r.right, Math.max(startX, e.clientX));
+    box.style.left = (a - r.left) + "px";
+    box.style.width = (b - a) + "px";
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (startX == null) return;
+    const moved = Math.abs(e.clientX - startX);
+    const from = xToTime(Math.min(startX, e.clientX));
+    const to = xToTime(Math.max(startX, e.clientX));
+    if (box) { box.remove(); box = null; }
+    startX = null;
+    // A click is not a drag: below a few pixels the user was probably just
+    // clicking, and snapping the range to one bucket would be a surprise.
+    if (moved < 4 || from == null || to == null) return;
+    setQueryRange(new Date(from), new Date(to + step()));
+  });
+})();
+
+// setQueryRange rewrites the query's time bounds, dropping whatever was there.
+function setQueryRange(from, to) {
+  const q = $("#q");
+  const parts = q.value.split(/\s+/).filter((t) => t && !/^(last|from|to)=/i.test(t));
+  parts.push("from=" + from.toISOString(), "to=" + to.toISOString());
+  q.value = parts.join(" ");
+  syncRangeOverride();
+  runSearch();
+}
+
+// ---------- wrap toggle ----------
+$("#wrap-toggle").addEventListener("click", () => {
+  const on = rowsEl.classList.toggle("wrap");
+  $("#wrap-toggle").classList.toggle("is-on", on);
+});
+
+// ---------- OVERVIEW ----------
+async function loadDash() {
+  const range = $("#dash-range").value;
+  try {
+    const [stats, alerts, errs] = await Promise.all([
+      api(`/api/v1/search/stats?last=${range}&interval=${bucketFor(range)}`),
+      api("/api/v1/alerts").catch(() => ({ rules: [] })),
+      api(`/api/v1/search?q=${encodeURIComponent("level=(error,fatal)")}&last=${range}&limit=8`).catch(() => ({ events: [] })),
+    ]);
+    renderDashTiles(stats, alerts);
+    renderBars(stats.histogram || [], $("#dash-bars"), false);
+    const h = stats.histogram || [];
+    $("#dash-hist-sub").textContent = h.length ? `${fmtClock(h[0].start)} – ${fmtClock(h[h.length - 1].start)}` : "no data";
+    renderDashServices(stats.facets || {});
+    renderDashAlerts(alerts.rules || []);
+    renderDashErrors(errs.events || []);
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error(e);
+  }
+}
+
+function levelCount(facets, lvl) {
+  const f = (facets.level || []).find((x) => x.value === lvl);
+  return f ? f.count : 0;
+}
+
+function renderDashTiles(stats, alerts) {
+  const host = $("#dash-tiles");
+  host.replaceChildren();
+  const facets = stats.facets || {};
+  const errors = levelCount(facets, "error") + levelCount(facets, "fatal");
+  const warns = levelCount(facets, "warn");
+  const firing = (alerts.rules || []).filter((r) => r.state === "firing").length;
+
+  const tile = (k, v, sub, sev, onClick) => {
+    const t = el("div", "tile" + (sev ? " sev-" + sev : "") + (onClick ? " clickable" : ""));
+    t.appendChild(el("div", "tile-k", k));
+    t.appendChild(el("div", "tile-v", v));
+    if (sub) t.appendChild(el("div", "tile-sub", sub));
+    if (onClick) t.addEventListener("click", onClick);
+    host.appendChild(t);
+  };
+
+  const range = $("#dash-range").value;
+  const goSearch = (frag) => () => { $("#q").value = frag; $("#range").value = range; navTo("search"); runSearch(); };
+
+  tile("Events", fmtNum(stats.total) + (stats.total_capped ? "+" : ""), "in this range", null, goSearch(""));
+  tile("Errors", fmtNum(errors), errors ? "needs a look" : "all clear", errors ? "error" : null, goSearch("level=(error,fatal)"));
+  tile("Warnings", fmtNum(warns), "", warns ? "warn" : null, goSearch("level=warn"));
+  tile("Services", fmtNum((facets.service || []).length), "reporting", null, null);
+  tile("Alerts firing", fmtNum(firing), (alerts.rules || []).length + " rules", firing ? "error" : null, () => navTo("alerts"));
+}
+
+function renderDashServices(facets) {
+  const host = $("#dash-services");
+  host.replaceChildren();
+  const svc = (facets.service || []).slice(0, 8);
+  if (!svc.length) { host.appendChild(el("span", "hint", "No events in this range.")); return; }
+  const max = Math.max(1, ...svc.map((f) => f.count));
+  svc.forEach((f) => {
+    const row = el("div", "bl-row");
+    const top = el("div", "bl-top");
+    top.appendChild(el("span", "bl-name", f.value || "—"));
+    top.appendChild(el("span", "bl-count", fmtNum(f.count)));
+    row.appendChild(top);
+    const bar = el("div", "bl-bar");
+    const fill = el("i");
+    fill.style.width = Math.round((f.count / max) * 100) + "%";
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    row.addEventListener("click", () => {
+      $("#q").value = "service=" + f.value;
+      $("#range").value = $("#dash-range").value;
+      navTo("search"); runSearch();
+    });
+    host.appendChild(row);
+  });
+}
+
+function renderDashAlerts(rules) {
+  const host = $("#dash-alerts");
+  host.replaceChildren();
+  if (!rules.length) {
+    host.appendChild(el("span", "hint", "No alert rules yet."));
+    return;
+  }
+  rules.slice(0, 8).forEach((r) => {
+    const row = el("div", "rule");
+    const dot = el("span", "rule-state " + (r.state || "unknown"));
+    dot.title = "state: " + (r.state || "unknown");
+    row.appendChild(dot);
+    const main = el("div", "rule-main");
+    main.appendChild(el("div", "rule-name", r.name));
+    main.appendChild(el("div", "rule-query", r.query));
+    row.appendChild(main);
+    row.addEventListener("click", () => navTo("alerts"));
+    row.style.cursor = "pointer";
+    host.appendChild(row);
+  });
+}
+
+function renderDashErrors(events) {
+  const host = $("#dash-errors");
+  host.replaceChildren();
+  if (!events.length) {
+    host.appendChild(el("span", "hint", "No errors in this range."));
+    return;
+  }
+  events.forEach((e) => {
+    const lvl = (e.level || "info").toLowerCase();
+    const row = el("div", "mini-row lvl-" + lvl);
+    row.appendChild(el("span", "mini-ts", fmtTime(e.timestamp).slice(0, 8)));
+    const msg = el("span", "mini-msg", `${e.service || "—"} · ${e.message || e.raw || ""}`);
+    msg.title = e.message || "";
+    row.appendChild(msg);
+    row.addEventListener("click", () => {
+      $("#q").value = "level=(error,fatal) service=" + (e.service || "");
+      navTo("search"); runSearch();
+    });
+    host.appendChild(row);
+  });
+}
+
+$("#dash-range").addEventListener("change", loadDash);
+$("#dash-refresh").addEventListener("click", loadDash);
+
+// ---------- keyboard ----------
+// Log triage is a keyboard activity: you scan, you narrow, you scan again.
+let cursorIdx = -1;
+
+function visibleRows() {
+  const host = views.search.hidden ? streamRows : rowsEl;
+  return Array.from(host.querySelectorAll(".row"));
+}
+function moveCursor(delta) {
+  const rows = visibleRows();
+  if (!rows.length) return;
+  rows.forEach((r) => r.classList.remove("is-cursor"));
+  cursorIdx = Math.max(0, Math.min(rows.length - 1, cursorIdx + delta));
+  const row = rows[cursorIdx];
+  row.classList.add("is-cursor");
+  row.scrollIntoView({ block: "nearest" });
+}
+function typingInField(t) {
+  return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
+}
+
+let gPending = false;
+document.addEventListener("keydown", (e) => {
+  const inField = typingInField(e.target);
+
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault(); openPalette(); return;
+  }
+  if (e.key === "Escape") {
+    if (!$("#palette").hidden) { closePalette(); return; }
+    const open = document.querySelector(".row.open");
+    if (open) open.classList.remove("open");
+    if (inField) e.target.blur();
+    return;
+  }
+  if (inField) return;
+
+  if (gPending) {
+    gPending = false;
+    const map = { o: "dash", s: "search", t: "tail", a: "alerts", c: "settings" };
+    if (map[e.key]) { e.preventDefault(); navTo(map[e.key]); }
+    return;
+  }
+  switch (e.key) {
+    case "/":
+      e.preventDefault(); navTo("search"); $("#q").focus(); $("#q").select(); break;
+    case "g": gPending = true; setTimeout(() => { gPending = false; }, 900); break;
+    case "j": e.preventDefault(); moveCursor(1); break;
+    case "k": e.preventDefault(); moveCursor(-1); break;
+    case "Enter": {
+      const rows = visibleRows();
+      if (rows[cursorIdx]) { e.preventDefault(); rows[cursorIdx].classList.toggle("open"); }
+      break;
+    }
+  }
+});
+
+// ---------- command palette ----------
+let palItems = [], palSel = 0;
+
+function paletteActions() {
+  const acts = [
+    { kind: "go", label: "Overview", run: () => navTo("dash") },
+    { kind: "go", label: "Search", run: () => navTo("search") },
+    { kind: "go", label: "Live tail", run: () => navTo("tail") },
+    { kind: "go", label: "Alerts", run: () => navTo("alerts") },
+    { kind: "go", label: "Settings", run: () => navTo("settings") },
+    { kind: "filter", label: "Only errors", run: () => { $("#q").value = "level=(error,fatal)"; navTo("search"); runSearch(); } },
+    { kind: "filter", label: "Only warnings", run: () => { $("#q").value = "level=warn"; navTo("search"); runSearch(); } },
+    { kind: "filter", label: "Clear the query", run: () => { $("#q").value = ""; navTo("search"); runSearch(); } },
+    { kind: "act", label: "Toggle message wrapping", run: () => $("#wrap-toggle").click() },
+    { kind: "act", label: "Toggle theme", run: () => $("#theme-toggle").click() },
+    { kind: "act", label: "Export matches as NDJSON", run: () => download("ndjson") },
+    { kind: "act", label: "Export matches as CSV", run: () => download("csv") },
+  ];
+  return acts;
+}
+
+function openPalette() {
+  $("#palette").hidden = false;
+  $("#pal-input").value = "";
+  renderPalette("");
+  $("#pal-input").focus();
+}
+function closePalette() { $("#palette").hidden = true; }
+
+function renderPalette(term) {
+  const t = term.trim().toLowerCase();
+  palItems = paletteActions().filter((a) => !t || a.label.toLowerCase().includes(t));
+  // Anything typed is also offered as a query, so the palette doubles as a
+  // quick way to run a search without leaving the keyboard.
+  if (t) {
+    palItems.unshift({
+      kind: "search", label: `Search for “${term.trim()}”`,
+      run: () => { $("#q").value = term.trim(); navTo("search"); runSearch(); },
+    });
+  }
+  palSel = 0;
+  const list = $("#pal-list");
+  list.replaceChildren();
+  if (!palItems.length) {
+    list.appendChild(el("div", "pal-empty", "Nothing matches."));
+    return;
+  }
+  palItems.forEach((it, i) => {
+    const row = el("div", "pal-item" + (i === palSel ? " is-sel" : ""));
+    row.appendChild(el("span", "pal-kind", it.kind));
+    row.appendChild(el("span", "pal-label", it.label));
+    row.addEventListener("click", () => { closePalette(); it.run(); });
+    list.appendChild(row);
+  });
+}
+
+function palMove(d) {
+  if (!palItems.length) return;
+  palSel = (palSel + d + palItems.length) % palItems.length;
+  Array.from($("#pal-list").children).forEach((c, i) => c.classList.toggle("is-sel", i === palSel));
+  const sel = $("#pal-list").children[palSel];
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+$("#pal-input").addEventListener("input", (e) => renderPalette(e.target.value));
+$("#pal-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palMove(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palMove(-1); }
+  else if (e.key === "Enter") {
+    e.preventDefault();
+    const it = palItems[palSel];
+    if (it) { closePalette(); it.run(); }
+  }
+});
+$("#palette").addEventListener("click", (e) => { if (e.target.id === "palette") closePalette(); });
+$("#palette-btn").addEventListener("click", openPalette);
+
+
+// ---------- histogram collapse ----------
+// Remembered, because whether you want the chart is a working style rather than
+// a per-search decision.
+(function initHistCollapse() {
+  const panel = $("#hist-panel"), btn = $("#hist-collapse");
+  if (!panel || !btn) return;
+  const apply = (on) => {
+    panel.classList.toggle("collapsed", on);
+    btn.textContent = on ? "show" : "hide";
+    btn.title = on ? "Show the chart" : "Collapse the chart";
+  };
+  apply(localStorage.getItem("omnilog_hist_collapsed") === "1");
+  btn.addEventListener("click", () => {
+    const on = !panel.classList.contains("collapsed");
+    apply(on);
+    try { localStorage.setItem("omnilog_hist_collapsed", on ? "1" : "0"); } catch (e) { /* ignore */ }
+  });
+})();
