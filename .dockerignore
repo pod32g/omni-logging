@@ -1,0 +1,8 @@
+# node_modules is large and platform-specific; the UI stage installs its own
+# with `npm ci` from the lockfile.
+internal/web/ui/node_modules/
+.git/
+omnilog
+*.db
+*.db-shm
+*.db-wal

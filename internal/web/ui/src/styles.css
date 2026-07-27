@@ -582,3 +582,9 @@ select { cursor: pointer; }
 /* ---------- keyboard help ---------- */
 .keys-help { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; font-size: 12px; align-items: center; }
 .keys-help span { color: var(--muted); }
+
+/* Each view is wrapped by the shell so it can stay mounted while hidden; the
+   wrapper has to carry the flex sizing the view itself used to get from body. */
+.view-host { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.view-host[hidden] { display: none !important; }
+#root { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }

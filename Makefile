@@ -2,7 +2,11 @@ BINARY  ?= omnilog
 VERSION ?= 0.1.0-dev
 LDFLAGS  = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test vet fmt run clean docker tidy
+.PHONY: ui build test vet fmt run clean docker tidy
+
+## ui: rebuild the embedded web UI bundle from source (requires Node)
+ui:
+	cd internal/web/ui && npm ci && npm run build
 
 ## build: compile the single binary (web UI is embedded)
 build:

@@ -16,7 +16,7 @@ aggregate, and live-tail through a web UI and a JSON API. Zero external services
 - **Aggregations** — a piped analytics stage (`| stats count by service`, `timechart`, `top`, `rare`), plus the counts-over-time histogram and field facets.
 - **Alerting** — scheduled rules over any search or aggregation, with threshold conditions, per-rule severity, and notifications on state transitions via webhook, Slack, or [Omni-Notify](https://github.com/pod32g/omni-notify) (which handles dedup, routing and delivery to Discord/Telegram/SMTP).
 - **Live tail** — real-time streaming of matching events (SSE), seeded with the last 50 matching events so the pane is useful the moment it opens rather than blank until the next log arrives.
-- **Web UI** — search, histogram, facets, expandable rows, live tail, paginated results + export, and a light/dark/system theme toggle.
+- **Web UI** — a React single-page app embedded in the binary: overview dashboard, search with a brushable histogram, live tail, alert and channel management, settings, a ⌘K command palette and keyboard navigation, in a light/dark/system theme.
 - **Forwarder** — `omnilog forward` tails files and ships them to the server, with an optional durable spool for at-least-once delivery across restarts and outages.
 - **Client SDKs** — dependency-free Go, Python and JavaScript clients with native `slog` / `logging` / pino integrations, so an app can emit directly without the forwarder ([`sdk/`](sdk/)).
 - **CLI query** — `omnilog query` searches a server from the terminal (table/JSON/NDJSON, `--follow` live tail).
@@ -145,24 +145,41 @@ Single Go binary, packages under `internal/`:
 | `tail` | In-memory pub/sub hub + SSE handler |
 | `api` | Router, auth + metrics middleware, search/stats/health/metrics handlers |
 | `metrics` | Tiny Prometheus-text registry (counters/gauges/histograms), no deps |
-| `web` | Embedded single-page UI (vanilla JS/CSS, no build step; uPlot vendored for charts) |
+| `web` | Embedded single-page UI (React + TypeScript + Vite, source in `web/ui`, bundle in `web/dist`) |
 | `forward` | File-tailing forwarder client (durable spool) |
 | `pipeline` | Grok/regex extraction, timestamp parsing, ingest-time transforms |
 | `alert` | Rule evaluation, scheduling and notification delivery |
 | `syslog` | RFC5424/RFC3164 parser + UDP/TCP collector |
 | `otlp` | OpenTelemetry logs receiver: HTTP (protobuf + JSON) and gRPC, both hand-rolled |
 
-The web UI is hand-written vanilla JS/CSS embedded via `go:embed`, so the whole
-project builds with a single `go build` — no Node toolchain required. Its one
-third-party asset is [uPlot](https://github.com/leeoniya/uPlot) (MIT, ~51 KB, no
-dependencies of its own), vendored under
-[`internal/web/dist/vendor/`](internal/web/dist/vendor/) and served from the
-binary rather than a CDN, so the UI still works air-gapped. It draws the
-histograms: the chart owns its own scale, which is a class of bug worth paying a
-dependency to remove — the previous hand-rolled bars sized themselves in pixels
-that had to be kept in step with a height in the stylesheet, and when the two
-drifted the bars painted over the panel header. Go module dependencies are
-unaffected. See the design spec in
+### The web UI
+
+React + TypeScript, built with Vite, charted with
+[uPlot](https://github.com/leeoniya/uPlot). Source lives in
+[`internal/web/ui/`](internal/web/ui/); the built bundle is committed to
+`internal/web/dist/` and embedded with `go:embed`.
+
+Committing the build output is deliberate: **`go build` still produces a working
+server with no Node toolchain**, which is the property that makes this project
+easy to build. The cost is that the bundle can go stale, so the Docker image
+rebuilds it from source in a Node stage rather than trusting the commit — a
+published container can never ship a UI someone forgot to rebuild.
+
+```sh
+make ui        # rebuild the bundle after changing internal/web/ui/ (needs Node)
+make build     # compile the binary; uses whatever bundle is committed
+cd internal/web/ui && npm run dev   # hot reload, proxying the API to :8080
+```
+
+Everything is served from the binary — no CDN, no font host — so the UI works
+air-gapped. Minification strips the licence banners the bundled MIT packages
+require, so `npm run licenses` regenerates `THIRD-PARTY.txt`, which ships beside
+the bundle and is served at `/THIRD-PARTY.txt`.
+
+Go module dependencies are unaffected by any of this: the server still depends
+on one SQLite driver and a YAML parser.
+
+See the design spec in
 [`docs/superpowers/specs/2026-06-14-omni-logging-design.md`](docs/superpowers/specs/2026-06-14-omni-logging-design.md).
 
 ## Observability
