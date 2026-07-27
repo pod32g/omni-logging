@@ -148,3 +148,34 @@ func TestDarkThemeIsNeutral(t *testing.T) {
 		}
 	}
 }
+
+// TestHistogramBarsAreBoundedByTheirContainer pins the fix for a real collision:
+// bar heights were computed in app.js as a pixel constant that had to be kept in
+// step with the .bars height in styles.css. When the CSS shrank to 46px the 62px
+// bars overflowed upward and painted over the panel header — 24 overlapping
+// element pairs. Sizing in percent makes the container the only source of truth,
+// so the two files cannot disagree again.
+func TestHistogramBarsAreBoundedByTheirContainer(t *testing.T) {
+	js := readAsset(t, "app.js")
+
+	i := strings.Index(js, "norm.style.height")
+	if i < 0 {
+		t.Fatal("app.js no longer sets a bar height; update this test with the new mechanism")
+	}
+	stmt := js[i:]
+	if end := strings.Index(stmt, "\n"); end >= 0 {
+		stmt = stmt[:end]
+	}
+	if !strings.Contains(stmt, `+ "%"`) {
+		t.Errorf("bar height is not relative to its container: %q", strings.TrimSpace(stmt))
+	}
+	if strings.Contains(stmt, `+ "px"`) {
+		t.Errorf("bar height is back to absolute pixels, which must track the CSS by hand: %q", strings.TrimSpace(stmt))
+	}
+
+	// And the plot area clips, so nothing can paint outside it regardless.
+	css := readAsset(t, "styles.css")
+	if !strings.Contains(css, ".bars { display: flex; align-items: flex-end; gap: 1px; height: 46px; overflow: hidden; }") {
+		t.Error("styles.css: .bars must clip its contents so an oversized bar cannot escape")
+	}
+}

@@ -464,7 +464,11 @@ function renderBars(rawHist, host, keep) {
   hist.forEach((b) => {
     const bar = el("div", "bar");
     const norm = el("div", "norm");
-    norm.style.height = Math.max(b.count > 0 ? 2 : 0, Math.round((b.count / max) * 62)) + "px";
+    // Percentage, not pixels: a bar is bounded by its container by construction.
+    // This was a pixel constant that had to be kept in step with the .bars
+    // height in CSS, and when the CSS shrank to 46px the 62px bars overflowed
+    // upward and collided with the header above them.
+    norm.style.height = (b.count > 0 ? Math.max(4, Math.round((b.count / max) * 100)) : 0) + "%";
     bar.title = `${fmtTs(b.start)} · ${fmtNum(b.count)} events`;
     bar.appendChild(norm);
     bars.appendChild(bar);
